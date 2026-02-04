@@ -28,7 +28,7 @@ git clone https://github.com/digitalocean-labs/do-app-platform-skills ~/.claude/
 
 ---
 
-## CLI Only - The Basics ($5/mo)
+## CLI Only ($5/mo)
 
 The simplest deployment - gateway with CLI access only via `doctl apps console`.
 
