@@ -6,7 +6,7 @@ This guide enables AI coding assistants (Claude Code, Cursor, Codex, Gemini, etc
 
 - Uses [do-app-sandbox](https://pypi.org/project/do-app-sandbox/) SDK for remote execution on app container console
 - References [do-app-platform-skills](https://github.com/digitalocean-labs/do-app-platform-skills) for best practices
-- Follows progressive deployment stages (CLI → Tailscale)
+- Supports two deployment modes: CLI Only and Production with Tailscale
 
 ## Prerequisites
 
@@ -28,7 +28,7 @@ git clone https://github.com/digitalocean-labs/do-app-platform-skills ~/.claude/
 
 ---
 
-## Stage 1: Deploy CLI-Only ($5/mo)
+## CLI Only - The Basics ($5/mo)
 
 The simplest deployment - gateway with CLI access only via `doctl apps console`.
 
@@ -64,14 +64,14 @@ openclaw channels status --probe
 
 ---
 
-## Stage 2: Production with Tailscale ($12/mo + Tailscale)
+## Production with Tailscale ($12/mo + Tailscale)
 
 Private network access - most secure for production use.
 
 ### Prompt
 
 ```
-Upgrade my OpenClaw deployment to Stage 2 with Tailscale for private access.
+Upgrade my OpenClaw deployment to use Tailscale for private access.
 
 Update the app configuration:
 - Instance size: basic-s (1 CPU, 2GB shared)
@@ -104,7 +104,7 @@ https://openclaw.<your-tailnet>.ts.net
 
 ---
 
-## Adding Persistence (Any Stage)
+## Adding Persistence
 
 Add DO Spaces backup to preserve data across restarts.
 

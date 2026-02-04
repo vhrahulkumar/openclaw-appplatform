@@ -6,12 +6,12 @@ Deploy [OpenClaw](https://github.com/openclaw/openclaw) - a multi-channel AI mes
 
 ## Table of Contents
 
-- [Quick Start: Choose Your Stage](#quick-start-choose-your-stage)
+- [Quick Start: Choose Your Deployment](#quick-start-choose-your-deployment)
 - [Architecture](#architecture)
-- [Stage 1: CLI Only - The Basics](#stage-1-cli-only---the-basics)
-- [Stage 2: Production with Tailscale](#stage-2-production-with-tailscale)
+- [CLI Only - The Basics](#cli-only---the-basics)
+- [Production with Tailscale](#production-with-tailscale)
 - [Setting up Tailscale](#setting-up-tailscale)
-- [Adding Persistence (Any Stage)](#adding-persistence-any-stage)
+- [Adding Persistence](#adding-persistence)
 - [AI-Assisted Setup](#ai-assisted-setup)
 - [CLI Cheat Sheet](#cli-cheat-sheet)
 - [Environment Variables](#environment-variables)
@@ -21,15 +21,15 @@ Deploy [OpenClaw](https://github.com/openclaw/openclaw) - a multi-channel AI mes
 
 ---
 
-## Quick Start: Choose Your Stage
+## Quick Start: Choose Your Deployment
 
-| Stage                   | What You Get            | Access Method        |
+| Deployment              | What You Get            | Access Method        |
 |-------------------------|-------------------------|----------------------|
-| **1. CLI Only**         | Gateway + CLI           | `doctl apps console` |
-| **2. + Tailscale**      | Private Network + UI    | Tailscale hostname   |
+| **CLI Only**            | Gateway + CLI           | `doctl apps console` |
+| **+ Tailscale**         | Private Network + UI    | Tailscale hostname   |
 | **+ Persistence**       | Data survives restarts  | DO Spaces            |
 
-**Start simple, add features as needed.** Start with Stage 1 for CLI-only access, or Stage 2 to add Tailscale for secure private network access.
+**Start simple, add features as needed.** Start with CLI Only for basic access, then add Tailscale for secure private network access and UI.
 
 ---
 
@@ -66,7 +66,7 @@ Deploy [OpenClaw](https://github.com/openclaw/openclaw) - a multi-channel AI mes
 
 ---
 
-## Stage 1: CLI Only - The Basics
+## CLI Only - The Basics
 
 The simplest deployment. Access via `doctl apps console` and use CLI commands.
 
@@ -77,7 +77,7 @@ The simplest deployment. Access via `doctl apps console` and use CLI commands.
 git clone https://github.com/digitalocean-labs/openclaw-appplatform
 cd openclaw-appplatform
 
-# Edit app.yaml - set instance size for Stage 1
+# Edit app.yaml - set instance size
 # instance_size_slug: apps-s-1vcpu-2gb  # 1 CPU, 2GB (minimum for stable operation)
 
 # Set your OPENCLAW_GATEWAY_TOKEN in app.yaml or DO dashboard
@@ -113,7 +113,7 @@ openclaw channels status --probe
 
 ---
 
-## Stage 2: Production with Tailscale
+## Production with Tailscale
 
 Private network access via your Tailscale tailnet. **Recommended for production.**
 
@@ -148,7 +148,7 @@ https://openclaw.<your-tailnet>.ts.net
 
 ### What's Added
 
-- ✅ Everything from Stage 1
+- ✅ Everything from CLI Only
 - ✅ Web Control UI
 - ✅ Stable hostname on your tailnet
 - ✅ Private access (only your devices)
@@ -216,7 +216,7 @@ https://<hostname>.<your-tailnet>.ts.net
 
 ---
 
-## Adding Persistence (Any Stage)
+## Adding Persistence
 
 Without persistence, all data is lost when the container restarts. Add DO Spaces to preserve:
 
