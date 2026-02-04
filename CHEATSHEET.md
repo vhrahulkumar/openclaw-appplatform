@@ -92,7 +92,6 @@ openclaw message send --channel discord --target channel:123456 --message "Hello
 
 ```bash
 /command/s6-svc -r /run/service/openclaw           # Restart openclaw
-
 /command/s6-svc -r /run/service/tailscale         # Restart tailscale
 /command/s6-svc -d /run/service/openclaw           # Stop openclaw
 /command/s6-svc -u /run/service/openclaw           # Start openclaw
