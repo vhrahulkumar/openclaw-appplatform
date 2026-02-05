@@ -41,7 +41,6 @@ The container uses [s6-overlay](https://github.com/just-containers/s6-overlay) f
 **Services** (`rootfs/etc/services.d/`):
 - `tailscale/` - Tailscale daemon (if TAILSCALE_ENABLE=true)
 - `openclaw/` - OpenClaw gateway
-- `ngrok/` - ngrok tunnel (if ENABLE_NGROK=true)
 - `sshd/` - SSH server (if SSH_ENABLE=true)
 - `backup/` - Periodic Restic backup service (if ENABLE_SPACES=true)
 - `prune/` - Periodic Restic snapshot cleanup (if ENABLE_SPACES=true)
