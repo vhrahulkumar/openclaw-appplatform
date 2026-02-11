@@ -121,7 +121,9 @@ RUN export SHELL=/bin/bash  && export NVM_DIR="$HOME/.nvm" \
   && export PNPM_HOME="/home/openclaw/.local/share/pnpm" \
   && export PATH="$PNPM_HOME:$PATH" \
   && pnpm add -g "openclaw@${OPENCLAW_VERSION}" \
-  && npx clawhub install notion github slack
+  && npx clawhub install notion \
+  && npx clawhub install github \
+  && npx clawhub install slack
 
 # Switch back to root for final setup
 USER root
