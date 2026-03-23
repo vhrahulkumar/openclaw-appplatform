@@ -469,12 +469,13 @@ jobs:
           ISSUE_BODY_FILE=$(mktemp)
           COMMENT_BODY_FILE=$(mktemp)
 
-          # Build regression note safely
-          REGRESSION_NOTE=""
+          # Build regression note safely — use temp file to avoid shell expansion
+          REGRESSION_FILE=$(mktemp)
           if [ "${{ needs.check-version.outputs.has_regressions }}" = "true" ]; then
-            REGRESSION_NOTE="### Known Regressions
+            echo '### Known Regressions' > "$REGRESSION_FILE"
+            cat >> "$REGRESSION_FILE" <<'REGEOF'
           ${{ needs.check-version.outputs.regression_list }}
-          "
+          REGEOF
           fi
 
           # Check if issue already exists for this version
@@ -487,10 +488,12 @@ jobs:
 
           **Failed stage:** ${STAGE}
 
-          \`\`\`
-          ${{ steps.failure.outputs.log }}
-          \`\`\`
           ENDBODY
+            echo '```' >> "$COMMENT_BODY_FILE"
+            cat >> "$COMMENT_BODY_FILE" <<'LOGEOF'
+          ${{ steps.failure.outputs.log }}
+          LOGEOF
+            echo '```' >> "$COMMENT_BODY_FILE"
             gh issue comment "$EXISTING" --body-file "$COMMENT_BODY_FILE"
             # Trigger Copilot with user token if available
             if [ -n "$COPILOT_TRIGGER_TOKEN" ]; then
@@ -512,14 +515,20 @@ jobs:
           **Workflow run:** [${RUN_URL}](${RUN_URL})
 
           ### Test Output
-          \`\`\`
-          ${{ steps.failure.outputs.log }}
-          \`\`\`
-
-          ${REGRESSION_NOTE}
-
-          ### Release Notes
           ENDBODY
+          # Append test log safely
+          echo '```' >> "$ISSUE_BODY_FILE"
+          cat >> "$ISSUE_BODY_FILE" <<'LOGEOF'
+          ${{ steps.failure.outputs.log }}
+          LOGEOF
+          echo '```' >> "$ISSUE_BODY_FILE"
+          echo '' >> "$ISSUE_BODY_FILE"
+          # Append regression notes if any
+          if [ -s "$REGRESSION_FILE" ]; then
+            cat "$REGRESSION_FILE" >> "$ISSUE_BODY_FILE"
+            echo '' >> "$ISSUE_BODY_FILE"
+          fi
+          echo '### Release Notes' >> "$ISSUE_BODY_FILE"
           # Append release notes safely — no shell expansion
           cat >> "$ISSUE_BODY_FILE" <<'RELEASEEOF'
           ${{ needs.check-version.outputs.release_notes }}
@@ -563,7 +572,7 @@ jobs:
             echo "⚠️ COPILOT_TRIGGER_TOKEN not set — Copilot must be triggered manually on issue #${ISSUE_NUMBER}"
             echo "   Assign Copilot as assignee or post a @copilot comment on the issue."
           fi
-          rm -f "$ISSUE_BODY_FILE" "$COMMENT_BODY_FILE"
+          rm -f "$ISSUE_BODY_FILE" "$COMMENT_BODY_FILE" "$REGRESSION_FILE"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           COPILOT_TRIGGER_TOKEN: ${{ secrets.COPILOT_TRIGGER_TOKEN }}
