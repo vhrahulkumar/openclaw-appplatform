@@ -1,0 +1,522 @@
+name: OpenClaw Upgrade Check
+
+# Automated weekly upgrade pipeline:
+#   1. check-version  — Compare current vs latest stable OpenClaw release
+#   2. docker-tests   — Bump Dockerfile, build image, run smoke tests locally
+#   3. push-e2e-image — Push tested image to GHCR for App Platform E2E
+#   4. app-platform-e2e — Deploy to App Platform, run live health checks
+#   5. open-pr        — Create upgrade PR if all tests pass
+#   6. open-issue     — Create issue + trigger Copilot agent if tests fail
+
+on:
+  schedule:
+    - cron: '0 14 * * 1'  # Every Monday at 2pm UTC
+  workflow_dispatch:
+    inputs:
+      force_version:
+        description: 'Force upgrade to this version (leave empty for latest)'
+        required: false
+        type: string
+  pull_request:
+    branches: [main]
+    # Run full pipeline (Docker + E2E) on agent fix PRs so CI validates before merge
+    paths:
+      - 'Dockerfile'
+      - 'rootfs/**'
+      - 'tests/**'
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  packages: write
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Job 1: Check for new version
+# ─────────────────────────────────────────────────────────────────────────────
+jobs:
+  check-version:
+    runs-on: ubuntu-latest
+    outputs:
+      needs_upgrade: ${{ steps.check.outputs.needs_upgrade }}
+      current: ${{ steps.check.outputs.current }}
+      latest: ${{ steps.check.outputs.latest }}
+      release_notes: ${{ steps.check.outputs.release_notes }}
+      has_regressions: ${{ steps.regressions.outputs.has_regressions }}
+      regression_list: ${{ steps.regressions.outputs.regression_list }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for new stable version
+        id: check
+        run: |
+          CURRENT=$(grep 'OPENCLAW_VERSION=' Dockerfile | head -1 | sed 's/.*=//')
+          echo "current=$CURRENT" >> $GITHUB_OUTPUT
+
+          # On pull_request: the PR already has the version bump — just validate it
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "PR mode: testing version already in Dockerfile ($CURRENT)"
+            echo "latest=$CURRENT" >> $GITHUB_OUTPUT
+            echo "needs_upgrade=true" >> $GITHUB_OUTPUT
+          else
+            if [ -n "${{ inputs.force_version }}" ]; then
+              LATEST="${{ inputs.force_version }}"
+              echo "Forced version: $LATEST"
+            else
+              LATEST=$(curl -s https://api.github.com/repos/openclaw/openclaw/releases | \
+                jq -r '[.[] | select(.prerelease == false)][0].name' | grep -oP '[0-9]+\.[0-9]+\.[0-9]+' || echo "")
+            fi
+
+            echo "latest=$LATEST" >> $GITHUB_OUTPUT
+
+            if [ -z "$LATEST" ]; then
+              echo "needs_upgrade=false" >> $GITHUB_OUTPUT
+              echo "Could not determine latest version"
+            elif [ "$CURRENT" = "$LATEST" ]; then
+              echo "needs_upgrade=false" >> $GITHUB_OUTPUT
+              echo "Already on latest: $CURRENT"
+            else
+              echo "needs_upgrade=true" >> $GITHUB_OUTPUT
+              echo "Upgrade available: $CURRENT → $LATEST"
+            fi
+          fi
+
+          # Get release notes
+          NOTES=$(curl -s https://api.github.com/repos/openclaw/openclaw/releases | \
+            jq -r '.[] | select(.prerelease == false) | "## \(.name)\n\(.body)\n"' | head -500)
+          echo "release_notes<<EOF" >> $GITHUB_OUTPUT
+          echo "$NOTES" | head -200 >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Check for known regressions
+        if: steps.check.outputs.needs_upgrade == 'true'
+        id: regressions
+        run: |
+          VERSION=${{ steps.check.outputs.latest }}
+          ISSUES=$(curl -s "https://api.github.com/search/issues?q=repo:openclaw/openclaw+label:regression+$VERSION&per_page=5" | \
+            jq -r '.items[] | "- #\(.number): \(.title)"')
+          if [ -n "$ISSUES" ]; then
+            echo "has_regressions=true" >> $GITHUB_OUTPUT
+            echo "regression_list<<EOF" >> $GITHUB_OUTPUT
+            echo "$ISSUES" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+          else
+            echo "has_regressions=false" >> $GITHUB_OUTPUT
+          fi
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Job 2: Build and run Docker smoke tests
+  # ───────────────────────────────────────────────────────────────────────────
+  docker-tests:
+    needs: check-version
+    if: needs.check-version.outputs.needs_upgrade == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      test_result: ${{ steps.test.outputs.result }}
+      test_log: ${{ steps.test.outputs.log }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Bump version in Dockerfile
+        if: github.event_name != 'pull_request'
+        run: |
+          VERSION=${{ needs.check-version.outputs.latest }}
+          sed -i "s/OPENCLAW_VERSION=.*/OPENCLAW_VERSION=${VERSION}/" Dockerfile
+          echo "Bumped to $VERSION"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: openclaw-test:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Save image for later jobs
+        run: docker save openclaw-test:latest -o /tmp/openclaw-test.tar
+
+      - name: Upload image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: upgrade-docker-image
+          path: /tmp/openclaw-test.tar
+          retention-days: 1
+
+      - name: Start container
+        run: |
+          docker run -d --name openclaw-upgrade-test \
+            -e OPENCLAW_GATEWAY_TOKEN=test-token-upgrade \
+            openclaw-test:latest
+          sleep 10
+
+      - name: Run upgrade verification
+        id: test
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        run: |
+          set +e
+          chmod +x tests/minimal/04-upgrade-verify.sh
+          OUTPUT=$(./tests/minimal/04-upgrade-verify.sh openclaw-upgrade-test 2>&1)
+          EXIT_CODE=$?
+          set -e
+
+          echo "$OUTPUT"
+
+          # Store results for downstream jobs
+          echo "log<<EOF" >> $GITHUB_OUTPUT
+          echo "$OUTPUT" | tail -40 >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+          if [ $EXIT_CODE -eq 0 ]; then
+            echo "result=pass" >> $GITHUB_OUTPUT
+          else
+            echo "result=fail" >> $GITHUB_OUTPUT
+          fi
+
+          exit $EXIT_CODE
+
+      - name: Dump container state on failure
+        if: failure()
+        run: |
+          echo "=== Container status ==="
+          docker ps -a --filter name=openclaw-upgrade-test
+          echo ""
+          echo "=== Process list ==="
+          docker exec openclaw-upgrade-test ps aux 2>/dev/null || echo "Container not running"
+          echo ""
+          echo "=== Service status ==="
+          for svc in $(docker exec openclaw-upgrade-test ls /run/service/ 2>/dev/null); do
+            echo -n "$svc: "
+            docker exec openclaw-upgrade-test /command/s6-svstat "/run/service/$svc" 2>/dev/null || echo "unknown"
+          done
+          echo ""
+          echo "=== Container logs (last 50 lines) ==="
+          docker logs --tail 50 openclaw-upgrade-test 2>&1 || true
+
+      - name: Cleanup container
+        if: always()
+        run: docker rm -f openclaw-upgrade-test 2>/dev/null || true
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Job 3: Push tested image to GHCR for App Platform E2E
+  # ───────────────────────────────────────────────────────────────────────────
+  push-e2e-image:
+    needs: [check-version, docker-tests]
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - name: Download image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: upgrade-docker-image
+          path: /tmp
+
+      - name: Load image
+        run: docker load -i /tmp/openclaw-test.tar
+
+      - name: Compute tag
+        id: tag
+        run: echo "tag=e2e-${{ github.run_id }}" >> $GITHUB_OUTPUT
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Tag and push
+        run: |
+          TAG="${{ steps.tag.outputs.tag }}"
+          docker tag openclaw-test:latest ghcr.io/${{ github.repository }}:${TAG}
+          docker push ghcr.io/${{ github.repository }}:${TAG}
+          echo "Pushed ghcr.io/${{ github.repository }}:${TAG}"
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Job 4: App Platform E2E (deploy, test, teardown)
+  # ───────────────────────────────────────────────────────────────────────────
+  app-platform-e2e:
+    needs: [check-version, docker-tests, push-e2e-image]
+    runs-on: ubuntu-latest
+    # Only run if we have credentials — otherwise skip gracefully
+    if: always() && needs.docker-tests.result == 'success'
+    outputs:
+      e2e_result: ${{ steps.e2e.outputs.result }}
+      e2e_log: ${{ steps.e2e.outputs.log }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install doctl
+        if: env.HAS_DO_TOKEN != ''
+        uses: digitalocean/action-doctl@v2
+        with:
+          token: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+        env:
+          HAS_DO_TOKEN: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+
+      - name: Run App Platform E2E
+        id: e2e
+        env:
+          DOCTL_TOKEN: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+          IMAGE_TAG: ${{ needs.push-e2e-image.outputs.image_tag }}
+          RUN_ID: ${{ github.run_id }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          DEPLOY_TIMEOUT: "600"
+        run: |
+          if [ -z "$DOCTL_TOKEN" ]; then
+            echo "SKIP: DOCTL_TOKEN not configured — skipping App Platform E2E"
+            echo "result=skip" >> $GITHUB_OUTPUT
+            echo "log=Skipped: DOCTL_TOKEN not set" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          set +e
+          chmod +x tests/e2e/deploy-and-test.sh
+          OUTPUT=$(./tests/e2e/deploy-and-test.sh 2>&1)
+          EXIT_CODE=$?
+          set -e
+
+          echo "$OUTPUT"
+
+          echo "log<<EOF" >> $GITHUB_OUTPUT
+          echo "$OUTPUT" | tail -40 >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+          if [ $EXIT_CODE -eq 0 ]; then
+            echo "result=pass" >> $GITHUB_OUTPUT
+          else
+            echo "result=fail" >> $GITHUB_OUTPUT
+          fi
+
+          exit $EXIT_CODE
+
+      - name: Cleanup stale E2E apps (janitor)
+        if: always()
+        env:
+          DOCTL_TOKEN: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+        run: |
+          if [ -n "$DOCTL_TOKEN" ]; then
+            chmod +x tests/e2e/cleanup-stale-apps.sh
+            MAX_AGE_HOURS=2 ./tests/e2e/cleanup-stale-apps.sh || true
+          fi
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Job 5: Open PR if all tests passed
+  # ───────────────────────────────────────────────────────────────────────────
+  open-pr:
+    needs: [check-version, docker-tests, app-platform-e2e]
+    if: |
+      always() &&
+      github.event_name != 'pull_request' &&
+      needs.docker-tests.result == 'success' &&
+      (needs.app-platform-e2e.result == 'success' || needs.app-platform-e2e.outputs.e2e_result == 'skip')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create upgrade PR
+        run: |
+          VERSION=${{ needs.check-version.outputs.latest }}
+          CURRENT=${{ needs.check-version.outputs.current }}
+          BRANCH="upgrade-openclaw-${VERSION}"
+
+          # Bump version
+          sed -i "s/OPENCLAW_VERSION=.*/OPENCLAW_VERSION=${VERSION}/" Dockerfile
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Check if branch already exists (re-run scenario)
+          if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
+            echo "Branch $BRANCH already exists — force-pushing updated version"
+            git checkout -B "$BRANCH"
+          else
+            git checkout -b "$BRANCH"
+          fi
+
+          git add Dockerfile
+          git commit -m "Upgrade OpenClaw to ${VERSION}" --allow-empty
+          git push -f origin "$BRANCH"
+
+          # Build PR body
+          E2E_STATUS="✅ Passed"
+          if [ "${{ needs.app-platform-e2e.outputs.e2e_result }}" = "skip" ]; then
+            E2E_STATUS="⏭️ Skipped (DOCTL_TOKEN not configured)"
+          fi
+
+          REGRESSION_NOTE=""
+          if [ "${{ needs.check-version.outputs.has_regressions }}" = "true" ]; then
+            REGRESSION_NOTE=$(cat <<'REGEOF'
+          ## ⚠️ Known Upstream Regressions
+          ${{ needs.check-version.outputs.regression_list }}
+
+          **Review these before merging.**
+          REGEOF
+          )
+          fi
+
+          # Check if PR already exists
+          EXISTING_PR=$(gh pr list --head "$BRANCH" --json number --jq '.[0].number' 2>/dev/null || echo "")
+          if [ -n "$EXISTING_PR" ]; then
+            echo "PR #$EXISTING_PR already exists — updating"
+            exit 0
+          fi
+
+          gh pr create \
+            --title "Upgrade OpenClaw to ${VERSION}" \
+            --body "## Automated Upgrade: ${CURRENT} → ${VERSION}
+
+          ### Test Results
+          | Test | Result |
+          |---|---|
+          | Docker image builds | ✅ |
+          | Version matches Dockerfile | ✅ |
+          | Config valid JSON + correct defaults | ✅ |
+          | Config owned by openclaw user | ✅ |
+          | Gateway process running | ✅ |
+          | Gateway HTTP responds 200 | ✅ |
+          | Tailscale binary present | ✅ |
+          | Channel plugins loaded | ✅ |
+          | Backup config valid | ✅ |
+          | openclaw doctor completes | ✅ |
+          | App Platform E2E | ${E2E_STATUS} |
+
+          ${REGRESSION_NOTE}
+
+          ## Release Notes
+          ${{ needs.check-version.outputs.release_notes }}
+
+          ---
+          **This is an automated version bump. Only the Dockerfile was changed.**
+          If release notes mention config/schema changes, manual review is required.
+          Do not merge if there are known regressions above.
+
+          <details><summary>Docker test output</summary>
+
+          \`\`\`
+          ${{ needs.docker-tests.outputs.test_log }}
+          \`\`\`
+          </details>"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Job 6: Open issue if tests failed — triggers Copilot agent investigation
+  # ───────────────────────────────────────────────────────────────────────────
+  open-issue:
+    needs: [check-version, docker-tests, app-platform-e2e]
+    if: |
+      always() &&
+      github.event_name != 'pull_request' &&
+      needs.check-version.outputs.needs_upgrade == 'true' &&
+      (needs.docker-tests.result == 'failure' || (needs.app-platform-e2e.result == 'failure' && needs.app-platform-e2e.outputs.e2e_result != 'skip'))
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Determine failure source
+        id: failure
+        run: |
+          if [ "${{ needs.docker-tests.result }}" = "failure" ]; then
+            echo "stage=Docker smoke tests" >> $GITHUB_OUTPUT
+            echo "log<<EOF" >> $GITHUB_OUTPUT
+            cat <<'LOGEOF' >> $GITHUB_OUTPUT
+          ${{ needs.docker-tests.outputs.test_log }}
+          LOGEOF
+            echo "EOF" >> $GITHUB_OUTPUT
+          else
+            echo "stage=App Platform E2E" >> $GITHUB_OUTPUT
+            echo "log<<EOF" >> $GITHUB_OUTPUT
+            cat <<'LOGEOF' >> $GITHUB_OUTPUT
+          ${{ needs.app-platform-e2e.outputs.e2e_log }}
+          LOGEOF
+            echo "EOF" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create issue for failed upgrade
+        run: |
+          VERSION=${{ needs.check-version.outputs.latest }}
+          CURRENT=${{ needs.check-version.outputs.current }}
+
+          REGRESSION_NOTE=""
+          if [ "${{ needs.check-version.outputs.has_regressions }}" = "true" ]; then
+            REGRESSION_NOTE="### Known Regressions
+          ${{ needs.check-version.outputs.regression_list }}
+          "
+          fi
+
+          # Check if issue already exists for this version
+          EXISTING=$(gh issue list --search "OpenClaw ${VERSION} upgrade failed" --json number --jq '.[0].number' 2>/dev/null || echo "")
+          if [ -n "$EXISTING" ]; then
+            echo "Issue #$EXISTING already exists for version $VERSION — adding comment"
+            gh issue comment "$EXISTING" --body "Workflow re-run failed again.
+          [Workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+
+          **Failed stage:** ${{ steps.failure.outputs.stage }}
+
+          \`\`\`
+          ${{ steps.failure.outputs.log }}
+          \`\`\`"
+            exit 0
+          fi
+
+          gh issue create \
+            --title "⚠️ OpenClaw ${VERSION} upgrade failed automated tests" \
+            --body "## Automated Upgrade Failed: ${CURRENT} → ${VERSION}
+
+          **Failed stage:** ${{ steps.failure.outputs.stage }}
+          **Workflow run:** [${{ github.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+
+          ### Test Output
+          \`\`\`
+          ${{ steps.failure.outputs.log }}
+          \`\`\`
+
+          ${REGRESSION_NOTE}
+
+          ### Release Notes
+          ${{ needs.check-version.outputs.release_notes }}
+
+          ---
+
+          ### For the Copilot Agent
+
+          @copilot Please investigate this failed upgrade using the \`/openclaw-upgrader\` prompt.
+
+          **Steps:**
+          1. Read \`UPGRADE-AUTOMATION-CONTEXT.md\` for full context on how upgrades work
+          2. Read the release notes above and the [full changelog](https://github.com/openclaw/openclaw/releases)
+          3. Identify the root cause of the test failure
+          4. Apply the **minimum necessary fix** following the rules in \`.github/copilot-instructions.md\`
+          5. Push a branch and open a PR — CI will run the full test suite
+          6. If CI passes, the PR is ready for human review
+          7. If CI fails after 2 attempts, comment with your analysis explaining what blocked it
+
+          **Critical rules:**
+          - Most upgrades need ONLY a Dockerfile version bump
+          - NEVER modify \`rootfs/etc/services.d/openclaw/run\`
+          - Use \`jq '.key //= \"value\"'\` (set-if-missing) for new defaults
+          - Every jq write MUST be followed by \`chown openclaw:openclaw\`
+          - If there's a known upstream regression, recommend skipping the version"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Cleanup: Delete GHCR E2E image after all jobs complete
+  # ───────────────────────────────────────────────────────────────────────────
+  cleanup-image:
+    needs: [push-e2e-image, app-platform-e2e, open-pr, open-issue]
+    if: always() && needs.push-e2e-image.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Note about GHCR cleanup
+        run: |
+          TAG="${{ needs.push-e2e-image.outputs.image_tag }}"
+          echo "E2E image ghcr.io/${{ github.repository }}:${TAG} can be cleaned up."
+          echo "GHCR image deletion requires a separate PAT or manual cleanup."
+          echo "Images with 'e2e-' prefix and >24h age can be safely purged."
