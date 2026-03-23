@@ -95,11 +95,13 @@ echo "$CREATE_OUTPUT" | tail -20
 # doctl apps create may return non-zero exit code even on success (e.g. warnings).
 # We check for a valid APP_ID instead of relying on exit code.
 # doctl apps create --output json returns either [{...}] or {...}
-APP_ID=$(echo "$CREATE_OUTPUT" | jq -r 'if type == "array" then .[0].id else .id end // empty' 2>/dev/null)
+# Note: use // "" not // empty — jq 1.7+ exits with code 5 when empty is triggered,
+# which kills the script under set -euo pipefail.
+APP_ID=$(echo "$CREATE_OUTPUT" | jq -r 'if type == "array" then .[0].id else .id end // ""' 2>/dev/null || true)
 
 if [ -z "$APP_ID" ]; then
     log "DEBUG: Trying alternative JSON paths..."
-    APP_ID=$(echo "$CREATE_OUTPUT" | jq -r '.. | .id? // empty' 2>/dev/null | head -1)
+    APP_ID=$(echo "$CREATE_OUTPUT" | jq -r '.. | objects | .id // ""' 2>/dev/null | grep -v '^$' | head -1 || true)
 fi
 
 log "Extracted APP_ID: $APP_ID"
