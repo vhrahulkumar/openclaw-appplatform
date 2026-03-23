@@ -120,13 +120,12 @@ POLL_INTERVAL=15
 PHASE=""
 
 while [ "$ELAPSED" -lt "$DEPLOY_TIMEOUT" ]; do
-    APP_JSON=$(doctl apps get "$APP_ID" --output json 2>/dev/null || echo "{}")
+    APP_JSON=$(doctl apps get "$APP_ID" --output json 2>/dev/null || echo "[]")
 
-    # doctl returns the app object directly (not wrapped in array)
-    # pending_deployment holds a deployment in progress (PENDING → BUILDING → DEPLOYING → ACTIVE)
-    # Once ACTIVE, it becomes the active_deployment and pending_deployment disappears
-    PENDING_PHASE=$(echo "$APP_JSON" | jq -r '.pending_deployment.phase // ""' 2>/dev/null)
-    ACTIVE_PHASE=$(echo "$APP_JSON" | jq -r '.active_deployment.phase // ""' 2>/dev/null)
+    # doctl apps get returns [{app}] (array) — normalise to object before extracting phase.
+    # Add || true so a jq type error never kills the loop under set -euo pipefail.
+    PENDING_PHASE=$(echo "$APP_JSON" | jq -r '(if type == "array" then .[0] else . end) | .pending_deployment.phase // ""' 2>/dev/null || true)
+    ACTIVE_PHASE=$(echo "$APP_JSON"  | jq -r '(if type == "array" then .[0] else . end) | .active_deployment.phase  // ""' 2>/dev/null || true)
 
     # Prefer pending (in-progress) over active (stable state)
     if [ -n "$PENDING_PHASE" ]; then
@@ -138,7 +137,7 @@ while [ "$ELAPSED" -lt "$DEPLOY_TIMEOUT" ]; do
         # Debug on first occurrence
         if [ "$ELAPSED" -eq 0 ]; then
             log "DEBUG: No deployment phase found. Raw JSON keys:"
-            echo "$APP_JSON" | jq -r 'keys | .[]' 2>/dev/null | head -10 || echo "jq failed"
+            echo "$APP_JSON" | jq -r '(if type == "array" then .[0] else . end) | keys | .[]' 2>/dev/null | head -10 || echo "jq failed"
         fi
     fi
 
