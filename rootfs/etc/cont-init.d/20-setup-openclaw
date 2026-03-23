@@ -113,7 +113,8 @@ if [ "${TAILSCALE_ENABLE:-false}" = "true" ]; then
 fi
 
 # Ensure tools.profile defaults to "coding" (2026.3.x changed default to "messaging")
-jq '.tools.profile //= "coding"' "$CONFIG_FILE" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "$CONFIG_FILE"
+# Use 'if .tools.profile == null then "coding" else . end' to handle both missing and null values
+jq '.tools.profile = (if .tools.profile == null then "coding" else .tools.profile end)' "$CONFIG_FILE" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "$CONFIG_FILE"
 echo "[generate-config] tools.profile: $(jq -r '.tools.profile' "$CONFIG_FILE")"
 
 # Add gateway auth token to config

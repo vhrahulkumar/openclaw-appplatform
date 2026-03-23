@@ -147,7 +147,10 @@ fi
 # ---------------------------------------------------------------------------
 # 12. pnpm global store excluded from backups
 # ---------------------------------------------------------------------------
-PNPM_EXCLUDED=$(docker exec "$CONTAINER" cat /etc/digitalocean/backup.yaml 2>/dev/null | grep -c 'pnpm' || echo "0")
+PNPM_EXCLUDED=$(docker exec "$CONTAINER" cat /etc/digitalocean/backup.yaml 2>/dev/null | grep -c 'pnpm' 2>/dev/null || echo "0")
+# Ensure we have a valid integer
+PNPM_EXCLUDED=${PNPM_EXCLUDED//[^0-9]/}
+PNPM_EXCLUDED=${PNPM_EXCLUDED:-0}
 if [ "$PNPM_EXCLUDED" -ge 1 ]; then
     pass "pnpm store excluded from backups"
 else
