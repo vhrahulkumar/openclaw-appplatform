@@ -84,7 +84,7 @@ cat "$SPEC_FILE"
 echo ""
 
 set +e
-CREATE_OUTPUT=$(doctl apps create --spec "$SPEC_FILE" --output json 2>&1)
+CREATE_OUTPUT=$(doctl apps create --spec "$SPEC_FILE" --output json 2>&1 | grep -v '^Notice:')
 CREATE_EXIT=$?
 set -e
 
