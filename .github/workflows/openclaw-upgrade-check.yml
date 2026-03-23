@@ -17,8 +17,8 @@ on:
         description: 'Force upgrade to this version (leave empty for latest)'
         required: false
         type: string
-      skip_to_e2e:
-        description: 'Skip build/Docker tests — provide existing GHCR image tag for E2E only'
+      image_tag:
+        description: 'Use an existing GHCR image tag for E2E (e.g. e2e-23438615314). Skips Docker build & push.'
         required: false
         type: string
   pull_request:
@@ -113,7 +113,7 @@ jobs:
   # ───────────────────────────────────────────────────────────────────────────
   docker-tests:
     needs: check-version
-    if: needs.check-version.outputs.needs_upgrade == 'true' && inputs.skip_to_e2e == ''
+    if: needs.check-version.outputs.needs_upgrade == 'true' && inputs.image_tag == ''
     runs-on: ubuntu-latest
     outputs:
       test_result: ${{ steps.test.outputs.result }}
@@ -210,7 +210,7 @@ jobs:
   # ───────────────────────────────────────────────────────────────────────────
   push-e2e-image:
     needs: [check-version, docker-tests]
-    if: inputs.skip_to_e2e == ''
+    if: inputs.image_tag == '' && needs.docker-tests.result == 'success'
     runs-on: ubuntu-latest
     outputs:
       image_tag: ${{ steps.tag.outputs.tag }}
@@ -248,8 +248,10 @@ jobs:
   app-platform-e2e:
     needs: [check-version, docker-tests, push-e2e-image]
     runs-on: ubuntu-latest
-    # Run if docker-tests passed, OR if skip_to_e2e is set (debugging E2E directly)
-    if: always() && (needs.docker-tests.result == 'success' || inputs.skip_to_e2e != '')
+    # Run when: docker-tests passed (normal flow) OR image_tag was provided directly (bypass)
+    if: |
+      always() &&
+      (inputs.image_tag != '' || needs.docker-tests.result == 'success')
     outputs:
       e2e_result: ${{ steps.e2e.outputs.result }}
       e2e_log: ${{ steps.e2e.outputs.log }}
@@ -265,8 +267,8 @@ jobs:
         id: e2e
         env:
           DOCTL_TOKEN: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
-          IMAGE_TAG: ${{ inputs.skip_to_e2e || needs.push-e2e-image.outputs.image_tag }}
-          GHCR_REPOSITORY: ${{ github.repository }}
+          # Use provided image_tag (bypass mode) or the tag pushed by push-e2e-image
+          IMAGE_TAG: ${{ inputs.image_tag || needs.push-e2e-image.outputs.image_tag }}
           RUN_ID: ${{ github.run_id }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           DEPLOY_TIMEOUT: "600"
@@ -315,6 +317,7 @@ jobs:
     needs: [check-version, docker-tests, app-platform-e2e]
     if: |
       always() &&
+      inputs.image_tag == '' &&
       github.event_name != 'pull_request' &&
       needs.docker-tests.result == 'success' &&
       (needs.app-platform-e2e.result == 'success' || needs.app-platform-e2e.outputs.e2e_result == 'skip')
@@ -415,6 +418,7 @@ jobs:
     needs: [check-version, docker-tests, app-platform-e2e]
     if: |
       always() &&
+      inputs.image_tag == '' &&
       github.event_name != 'pull_request' &&
       needs.check-version.outputs.needs_upgrade == 'true' &&
       (needs.docker-tests.result == 'failure' || (needs.app-platform-e2e.result == 'failure' && needs.app-platform-e2e.outputs.e2e_result != 'skip'))
