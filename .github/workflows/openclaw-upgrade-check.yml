@@ -252,18 +252,16 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install doctl
-        if: env.HAS_DO_TOKEN != ''
         uses: digitalocean/action-doctl@v2
         with:
           token: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
-        env:
-          HAS_DO_TOKEN: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
 
       - name: Run App Platform E2E
         id: e2e
         env:
           DOCTL_TOKEN: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
           IMAGE_TAG: ${{ needs.push-e2e-image.outputs.image_tag }}
+          GHCR_REPOSITORY: ${{ github.repository }}
           RUN_ID: ${{ github.run_id }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           DEPLOY_TIMEOUT: "600"

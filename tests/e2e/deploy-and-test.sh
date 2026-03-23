@@ -8,6 +8,7 @@
 # Required env vars:
 #   DOCTL_TOKEN         — DigitalOcean API token with write access
 #   IMAGE_TAG           — GHCR image tag to deploy (e.g. "e2e-12345")
+#   GHCR_REPOSITORY     — GHCR repository path (set automatically by CI via github.repository)
 #
 # Optional env vars:
 #   TELEGRAM_BOT_TOKEN  — Telegram bot token for channel probe
@@ -53,10 +54,15 @@ if [ -z "${IMAGE_TAG:-}" ]; then
     exit 1
 fi
 
+if [ -z "${GHCR_REPOSITORY:-}" ]; then
+    fail "GHCR_REPOSITORY is required (e.g. 'digitalocean-labs/openclaw-appplatform')"
+    exit 1
+fi
+
 # Configure doctl auth
 export DIGITALOCEAN_ACCESS_TOKEN="$DOCTL_TOKEN"
 
-log "Starting App Platform E2E (run=$RUN_ID, image=ghcr.io/digitalocean-labs/openclaw-appplatform:${IMAGE_TAG})"
+log "Starting App Platform E2E (run=$RUN_ID, image=ghcr.io/${GHCR_REPOSITORY}:${IMAGE_TAG})"
 
 # ─── Render app spec ─────────────────────────────────────────────────────────
 
@@ -65,6 +71,7 @@ sed \
     -e "s|PLACEHOLDER_RUN_ID|${RUN_ID}|g" \
     -e "s|PLACEHOLDER_IMAGE_TAG|${IMAGE_TAG}|g" \
     -e "s|PLACEHOLDER_GATEWAY_TOKEN|${GATEWAY_TOKEN}|g" \
+    -e "s|PLACEHOLDER_REPOSITORY|${GHCR_REPOSITORY}|g" \
     "$SCRIPT_DIR/app-spec-template.yaml" > "$SPEC_FILE"
 
 log "Rendered app spec → $SPEC_FILE"
