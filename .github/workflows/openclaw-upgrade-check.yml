@@ -457,7 +457,7 @@ jobs:
           EXISTING=$(gh issue list --search "OpenClaw ${VERSION} upgrade failed" --json number --jq '.[0].number' 2>/dev/null || echo "")
           if [ -n "$EXISTING" ]; then
             echo "Issue #$EXISTING already exists for version $VERSION — adding comment"
-            gh issue comment "$EXISTING" --body "@copilot Workflow re-run failed again — please continue investigating.
+            gh issue comment "$EXISTING" --body "Workflow re-run failed again.
           [Workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
 
           **Failed stage:** ${{ steps.failure.outputs.stage }}
@@ -465,6 +465,11 @@ jobs:
           \`\`\`
           ${{ steps.failure.outputs.log }}
           \`\`\`"
+            # Trigger Copilot with user token if available
+            if [ -n "$COPILOT_TRIGGER_TOKEN" ]; then
+              GH_TOKEN="$COPILOT_TRIGGER_TOKEN" gh issue comment "$EXISTING" \
+                --body "@copilot Workflow re-run still failing — please continue investigating."
+            fi
             exit 0
           fi
 
@@ -487,11 +492,14 @@ jobs:
 
           ISSUE_NUMBER=$(echo "$ISSUE_URL" | grep -oE '[0-9]+$')
 
-          # Assign Copilot to the issue (primary trigger for the coding agent)
-          gh issue edit "$ISSUE_NUMBER" --add-assignee "Copilot" 2>/dev/null || true
-
-          # Post a comment with the full task instructions (comment @mentions trigger the agent)
-          gh issue comment "$ISSUE_NUMBER" --body "@copilot Please investigate this failed upgrade using the \`/openclaw-upgrader\` prompt.
+          # Trigger the Copilot coding agent.
+          # GITHUB_TOKEN (bot) cannot trigger Copilot — only a real user token can.
+          # Store a fine-grained PAT with issues:write as secret COPILOT_TRIGGER_TOKEN.
+          if [ -n "$COPILOT_TRIGGER_TOKEN" ]; then
+            GH_TOKEN="$COPILOT_TRIGGER_TOKEN" gh issue edit "$ISSUE_NUMBER" \
+              --add-assignee "Copilot" 2>/dev/null || true
+            GH_TOKEN="$COPILOT_TRIGGER_TOKEN" gh issue comment "$ISSUE_NUMBER" \
+              --body "@copilot Please investigate this failed upgrade using the \`/openclaw-upgrader\` prompt.
 
           **Steps:**
           1. Read \`UPGRADE-AUTOMATION-CONTEXT.md\` for full context on how upgrades work
@@ -508,8 +516,13 @@ jobs:
           - Use \`jq '.key //= \"value\"'\` (set-if-missing) for new defaults
           - Every jq write MUST be followed by \`chown openclaw:openclaw\`
           - If there's a known upstream regression, recommend skipping the version"
+          else
+            echo "⚠️ COPILOT_TRIGGER_TOKEN not set — Copilot must be triggered manually on issue #${ISSUE_NUMBER}"
+            echo "   Assign Copilot as assignee or post a @copilot comment on the issue."
+          fi
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COPILOT_TRIGGER_TOKEN: ${{ secrets.COPILOT_TRIGGER_TOKEN }}
 
   # ───────────────────────────────────────────────────────────────────────────
   # Cleanup: Delete GHCR E2E image after all jobs complete
