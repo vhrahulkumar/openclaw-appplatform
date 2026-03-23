@@ -76,7 +76,7 @@ jobs:
             if [ -z "$LATEST" ]; then
               echo "needs_upgrade=false" >> $GITHUB_OUTPUT
               echo "Could not determine latest version"
-            elif [ "$CURRENT" = "$LATEST" ]; then
+            elif [ "$CURRENT" = "$LATEST" ] && [ -z "${{ inputs.force_version }}" ]; then
               echo "needs_upgrade=false" >> $GITHUB_OUTPUT
               echo "Already on latest: $CURRENT"
             else
