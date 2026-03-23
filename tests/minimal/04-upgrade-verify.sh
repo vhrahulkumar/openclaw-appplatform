@@ -147,8 +147,7 @@ fi
 # ---------------------------------------------------------------------------
 # 12. pnpm global store excluded from backups
 # ---------------------------------------------------------------------------
-PNPM_EXCLUDED=$(docker exec "$CONTAINER" cat /etc/digitalocean/backup.yaml 2>/dev/null | grep -c 'pnpm' || echo "0")
-if [ "$PNPM_EXCLUDED" -ge 1 ]; then
+if docker exec "$CONTAINER" grep -q '.local/share/pnpm/store' /etc/digitalocean/backup.yaml 2>/dev/null; then
     pass "pnpm store excluded from backups"
 else
     warn "pnpm store may not be excluded from backups"
