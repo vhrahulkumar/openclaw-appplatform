@@ -374,9 +374,9 @@ jobs:
             exit 0
           fi
 
-          gh pr create \
-            --title "Upgrade OpenClaw to ${VERSION}" \
-            --body "## Automated Upgrade: ${CURRENT} → ${VERSION}
+          PR_BODY_FILE=$(mktemp)
+          cat > "$PR_BODY_FILE" <<ENDBODY
+          ## Automated Upgrade: ${CURRENT} → ${VERSION}
 
           ### Test Results
           | Test | Result |
@@ -396,7 +396,12 @@ jobs:
           ${REGRESSION_NOTE}
 
           ## Release Notes
+          ENDBODY
+          # Append release notes safely — no shell expansion
+          cat >> "$PR_BODY_FILE" <<'RELEASEEOF'
           ${{ needs.check-version.outputs.release_notes }}
+          RELEASEEOF
+          cat >> "$PR_BODY_FILE" <<ENDBODY
 
           ---
           **This is an automated version bump. Only the Dockerfile was changed.**
@@ -408,7 +413,13 @@ jobs:
           \`\`\`
           ${{ needs.docker-tests.outputs.test_log }}
           \`\`\`
-          </details>"
+          </details>
+          ENDBODY
+
+          gh pr create \
+            --title "Upgrade OpenClaw to ${VERSION}" \
+            --body-file "$PR_BODY_FILE"
+          rm -f "$PR_BODY_FILE"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -490,7 +501,10 @@ jobs:
             exit 0
           fi
 
-          # Write issue body to file — keeps release notes content isolated from shell env
+          # Write issue body to file.
+          # CRITICAL: Use a quoted heredoc (<<'ENDBODY') for the release notes section
+          # to prevent bash from expanding $(), ${}, backticks etc. in upstream release notes.
+          # Dynamic variables are written first, then the release notes appended safely.
           cat > "$ISSUE_BODY_FILE" <<ENDBODY
           ## Automated Upgrade Failed: ${CURRENT} → ${VERSION}
 
@@ -505,8 +519,11 @@ jobs:
           ${REGRESSION_NOTE}
 
           ### Release Notes
-          ${{ needs.check-version.outputs.release_notes }}
           ENDBODY
+          # Append release notes safely — no shell expansion
+          cat >> "$ISSUE_BODY_FILE" <<'RELEASEEOF'
+          ${{ needs.check-version.outputs.release_notes }}
+          RELEASEEOF
 
           ISSUE_URL=$(gh issue create \
             --title "⚠️ OpenClaw ${VERSION} upgrade failed automated tests" \
