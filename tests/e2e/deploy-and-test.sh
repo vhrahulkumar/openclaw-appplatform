@@ -89,28 +89,28 @@ CREATE_EXIT=$?
 set -e
 
 log "doctl apps create exit code: $CREATE_EXIT"
+# Show first line to expose any non-JSON prefix (e.g. doctl warning on stderr via 2>&1)
+log "doctl apps create output (first line): $(echo "$CREATE_OUTPUT" | head -1 | cut -c1-300)"
 log "doctl apps create output (last 20 lines):"
 echo "$CREATE_OUTPUT" | tail -20
 
-# doctl apps create may return non-zero exit code even on success (e.g. warnings).
-# We check for a valid APP_ID instead of relying on exit code.
-# doctl apps create --output json returns either [{...}] or {...}
-# Note: use // "" not // empty — jq 1.7+ exits with code 5 when empty is triggered,
-# which kills the script under set -euo pipefail.
+# Extract app ID. doctl 2>&1 capture means stderr warnings can prefix the JSON,
+# breaking jq. Try jq first, then fall back to grep (the proven pattern).
 APP_ID=$(echo "$CREATE_OUTPUT" | jq -r 'if type == "array" then .[0].id else .id end // ""' 2>/dev/null || true)
 
 if [ -z "$APP_ID" ]; then
-    log "DEBUG: Trying alternative JSON paths..."
-    APP_ID=$(echo "$CREATE_OUTPUT" | jq -r '.. | objects | .id // ""' 2>/dev/null | grep -v '^$' | head -1 || true)
+    log "DEBUG: jq failed or returned empty — trying grep fallback..."
+    APP_ID=$(echo "$CREATE_OUTPUT" | grep -o '"id": "[^"]*"' | head -1 | sed 's/"id": "//;s/"//' || true)
+fi
+
+if [ -z "$APP_ID" ]; then
+    log "DEBUG: grep also failed — dumping full output for inspection:"
+    echo "$CREATE_OUTPUT"
+    fail "Could not extract app ID from doctl output"
+    exit 1
 fi
 
 log "Extracted APP_ID: $APP_ID"
-
-if [ -z "$APP_ID" ]; then
-    fail "Could not extract app ID from doctl output"
-    echo "$CREATE_OUTPUT"
-    exit 1
-fi
 
 log "App created: $APP_ID"
 log "Waiting for deployment to become active (timeout: ${DEPLOY_TIMEOUT}s)..."
