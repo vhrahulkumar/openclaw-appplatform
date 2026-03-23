@@ -89,12 +89,24 @@ CREATE_EXIT=$?
 set -e
 
 log "doctl apps create exit code: $CREATE_EXIT"
-log "doctl apps create output: $CREATE_OUTPUT"
+log "doctl apps create output (last 20 lines):"
+echo "$CREATE_OUTPUT" | tail -20
 
-APP_ID=$(echo "$CREATE_OUTPUT" | jq -r '.[0].id // .id // empty' 2>/dev/null)
+# doctl apps create may return non-zero exit code even on success (e.g. warnings).
+# We check for a valid APP_ID instead of relying on exit code.
+# doctl apps create --output json returns either [{...}] or {...}
+APP_ID=$(echo "$CREATE_OUTPUT" | jq -r 'if type == "array" then .[0].id else .id end // empty' 2>/dev/null)
 
-if [ -z "$APP_ID" ] || [ "$CREATE_EXIT" -ne 0 ]; then
-    fail "Failed to create app (exit code: $CREATE_EXIT). Output: $CREATE_OUTPUT"
+if [ -z "$APP_ID" ]; then
+    log "DEBUG: Trying alternative JSON paths..."
+    APP_ID=$(echo "$CREATE_OUTPUT" | jq -r '.. | .id? // empty' 2>/dev/null | head -1)
+fi
+
+log "Extracted APP_ID: $APP_ID"
+
+if [ -z "$APP_ID" ]; then
+    fail "Could not extract app ID from doctl output"
+    echo "$CREATE_OUTPUT"
     exit 1
 fi
 

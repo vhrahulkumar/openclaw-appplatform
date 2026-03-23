@@ -17,6 +17,10 @@ on:
         description: 'Force upgrade to this version (leave empty for latest)'
         required: false
         type: string
+      skip_to_e2e:
+        description: 'Skip build/Docker tests — provide existing GHCR image tag for E2E only'
+        required: false
+        type: string
   pull_request:
     branches: [main]
     # Run full pipeline (Docker + E2E) on agent fix PRs so CI validates before merge
@@ -109,7 +113,7 @@ jobs:
   # ───────────────────────────────────────────────────────────────────────────
   docker-tests:
     needs: check-version
-    if: needs.check-version.outputs.needs_upgrade == 'true'
+    if: needs.check-version.outputs.needs_upgrade == 'true' && inputs.skip_to_e2e == ''
     runs-on: ubuntu-latest
     outputs:
       test_result: ${{ steps.test.outputs.result }}
@@ -206,6 +210,7 @@ jobs:
   # ───────────────────────────────────────────────────────────────────────────
   push-e2e-image:
     needs: [check-version, docker-tests]
+    if: inputs.skip_to_e2e == ''
     runs-on: ubuntu-latest
     outputs:
       image_tag: ${{ steps.tag.outputs.tag }}
@@ -243,8 +248,8 @@ jobs:
   app-platform-e2e:
     needs: [check-version, docker-tests, push-e2e-image]
     runs-on: ubuntu-latest
-    # Only run if we have credentials — otherwise skip gracefully
-    if: always() && needs.docker-tests.result == 'success'
+    # Run if docker-tests passed, OR if skip_to_e2e is set (debugging E2E directly)
+    if: always() && (needs.docker-tests.result == 'success' || inputs.skip_to_e2e != '')
     outputs:
       e2e_result: ${{ steps.e2e.outputs.result }}
       e2e_log: ${{ steps.e2e.outputs.log }}
@@ -260,7 +265,7 @@ jobs:
         id: e2e
         env:
           DOCTL_TOKEN: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
-          IMAGE_TAG: ${{ needs.push-e2e-image.outputs.image_tag }}
+          IMAGE_TAG: ${{ inputs.skip_to_e2e || needs.push-e2e-image.outputs.image_tag }}
           GHCR_REPOSITORY: ${{ github.repository }}
           RUN_ID: ${{ github.run_id }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
