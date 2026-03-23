@@ -450,7 +450,15 @@ jobs:
         run: |
           VERSION=${{ needs.check-version.outputs.latest }}
           CURRENT=${{ needs.check-version.outputs.current }}
+          STAGE="${{ steps.failure.outputs.stage }}"
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
+          # Write dynamic content to temp files to prevent shell variable expansion
+          # from leaking secrets into inline --body strings
+          ISSUE_BODY_FILE=$(mktemp)
+          COMMENT_BODY_FILE=$(mktemp)
+
+          # Build regression note safely
           REGRESSION_NOTE=""
           if [ "${{ needs.check-version.outputs.has_regressions }}" = "true" ]; then
             REGRESSION_NOTE="### Known Regressions
@@ -462,28 +470,32 @@ jobs:
           EXISTING=$(gh issue list --search "OpenClaw ${VERSION} upgrade failed" --json number --jq '.[0].number' 2>/dev/null || echo "")
           if [ -n "$EXISTING" ]; then
             echo "Issue #$EXISTING already exists for version $VERSION — adding comment"
-            gh issue comment "$EXISTING" --body "Workflow re-run failed again.
-          [Workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+            cat > "$COMMENT_BODY_FILE" <<ENDBODY
+          Workflow re-run failed again.
+          [Workflow run](${RUN_URL})
 
-          **Failed stage:** ${{ steps.failure.outputs.stage }}
+          **Failed stage:** ${STAGE}
 
           \`\`\`
           ${{ steps.failure.outputs.log }}
-          \`\`\`"
+          \`\`\`
+          ENDBODY
+            gh issue comment "$EXISTING" --body-file "$COMMENT_BODY_FILE"
             # Trigger Copilot with user token if available
             if [ -n "$COPILOT_TRIGGER_TOKEN" ]; then
-              GH_TOKEN="$COPILOT_TRIGGER_TOKEN" gh issue comment "$EXISTING" \
-                --body "@copilot Workflow re-run still failing — please continue investigating."
+              echo "@copilot Workflow re-run still failing — please continue investigating." > "$COMMENT_BODY_FILE"
+              GH_TOKEN="$COPILOT_TRIGGER_TOKEN" gh issue comment "$EXISTING" --body-file "$COMMENT_BODY_FILE"
             fi
+            rm -f "$ISSUE_BODY_FILE" "$COMMENT_BODY_FILE"
             exit 0
           fi
 
-          ISSUE_URL=$(gh issue create \
-            --title "⚠️ OpenClaw ${VERSION} upgrade failed automated tests" \
-            --body "## Automated Upgrade Failed: ${CURRENT} → ${VERSION}
+          # Write issue body to file — keeps release notes content isolated from shell env
+          cat > "$ISSUE_BODY_FILE" <<ENDBODY
+          ## Automated Upgrade Failed: ${CURRENT} → ${VERSION}
 
-          **Failed stage:** ${{ steps.failure.outputs.stage }}
-          **Workflow run:** [${{ github.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+          **Failed stage:** ${STAGE}
+          **Workflow run:** [${RUN_URL}](${RUN_URL})
 
           ### Test Output
           \`\`\`
@@ -493,7 +505,12 @@ jobs:
           ${REGRESSION_NOTE}
 
           ### Release Notes
-          ${{ needs.check-version.outputs.release_notes }}")
+          ${{ needs.check-version.outputs.release_notes }}
+          ENDBODY
+
+          ISSUE_URL=$(gh issue create \
+            --title "⚠️ OpenClaw ${VERSION} upgrade failed automated tests" \
+            --body-file "$ISSUE_BODY_FILE")
 
           ISSUE_NUMBER=$(echo "$ISSUE_URL" | grep -oE '[0-9]+$')
 
@@ -503,28 +520,33 @@ jobs:
           if [ -n "$COPILOT_TRIGGER_TOKEN" ]; then
             GH_TOKEN="$COPILOT_TRIGGER_TOKEN" gh issue edit "$ISSUE_NUMBER" \
               --add-assignee "Copilot" 2>/dev/null || true
-            GH_TOKEN="$COPILOT_TRIGGER_TOKEN" gh issue comment "$ISSUE_NUMBER" \
-              --body "@copilot Please investigate this failed upgrade using the \`/openclaw-upgrader\` prompt.
+            cat > "$COMMENT_BODY_FILE" <<'ENDCOMMENT'
+          @copilot Please investigate this failed upgrade using the `/openclaw-upgrader` prompt.
 
           **Steps:**
-          1. Read \`UPGRADE-AUTOMATION-CONTEXT.md\` for full context on how upgrades work
-          2. Read the release notes above and the [full changelog](https://github.com/openclaw/openclaw/releases)
+          1. Read `UPGRADE-AUTOMATION-CONTEXT.md` for full context on how upgrades work
+          2. Read the release notes in the issue body and the [full changelog](https://github.com/openclaw/openclaw/releases)
           3. Identify the root cause of the test failure
-          4. Apply the **minimum necessary fix** following the rules in \`.github/copilot-instructions.md\`
+          4. Apply the **minimum necessary fix** following the rules in `.github/copilot-instructions.md`
           5. Push a branch and open a PR — CI will run the full test suite
           6. If CI passes, the PR is ready for human review
           7. If CI fails after 2 attempts, comment with your analysis explaining what blocked it
 
           **Critical rules:**
           - Most upgrades need ONLY a Dockerfile version bump
-          - NEVER modify \`rootfs/etc/services.d/openclaw/run\`
-          - Use \`jq '.key //= \"value\"'\` (set-if-missing) for new defaults
-          - Every jq write MUST be followed by \`chown openclaw:openclaw\`
-          - If there's a known upstream regression, recommend skipping the version"
+          - NEVER modify `rootfs/etc/services.d/openclaw/run`
+          - NEVER modify test files in `tests/` — fix the application code instead
+          - Use `jq '.key //= "value"'` (set-if-missing) for new defaults
+          - Every jq write MUST be followed by `chown openclaw:openclaw`
+          - If there's a known upstream regression, recommend skipping the version
+          ENDCOMMENT
+            GH_TOKEN="$COPILOT_TRIGGER_TOKEN" gh issue comment "$ISSUE_NUMBER" \
+              --body-file "$COMMENT_BODY_FILE"
           else
             echo "⚠️ COPILOT_TRIGGER_TOKEN not set — Copilot must be triggered manually on issue #${ISSUE_NUMBER}"
             echo "   Assign Copilot as assignee or post a @copilot comment on the issue."
           fi
+          rm -f "$ISSUE_BODY_FILE" "$COMMENT_BODY_FILE"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           COPILOT_TRIGGER_TOKEN: ${{ secrets.COPILOT_TRIGGER_TOKEN }}
