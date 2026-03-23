@@ -79,11 +79,22 @@ log "Rendered app spec → $SPEC_FILE"
 # ─── Deploy ───────────────────────────────────────────────────────────────────
 
 log "Creating App Platform app..."
+log "App spec contents:"
+cat "$SPEC_FILE"
+echo ""
+
+set +e
 CREATE_OUTPUT=$(doctl apps create --spec "$SPEC_FILE" --output json 2>&1)
+CREATE_EXIT=$?
+set -e
+
+log "doctl apps create exit code: $CREATE_EXIT"
+log "doctl apps create output: $CREATE_OUTPUT"
+
 APP_ID=$(echo "$CREATE_OUTPUT" | jq -r '.[0].id // .id // empty' 2>/dev/null)
 
-if [ -z "$APP_ID" ]; then
-    fail "Failed to create app. Output: $CREATE_OUTPUT"
+if [ -z "$APP_ID" ] || [ "$CREATE_EXIT" -ne 0 ]; then
+    fail "Failed to create app (exit code: $CREATE_EXIT). Output: $CREATE_OUTPUT"
     exit 1
 fi
 
