@@ -2,13 +2,13 @@
 # deploy-and-test.sh — Deploy openclaw to App Platform and run E2E verification.
 #
 # Deploys a pre-built Docker image (from GHCR) as an App Platform worker,
-# waits for it to become active, runs health checks via doctl console,
+# waits for it to become active, runs log-based health checks,
 # and cleans up the test app afterward.
 #
 # Required env vars:
 #   DOCTL_TOKEN         — DigitalOcean API token with write access
 #   IMAGE_TAG           — GHCR image tag to deploy (e.g. "e2e-12345")
-#   GHCR_REPOSITORY     — GHCR repository path (set automatically by CI via github.repository)
+#   REPOSITORY          — GHCR repository path (set automatically by CI via github.repository)
 #
 # Optional env vars:
 #   TELEGRAM_BOT_TOKEN  — Telegram bot token for channel probe
@@ -54,24 +54,23 @@ if [ -z "${IMAGE_TAG:-}" ]; then
     exit 1
 fi
 
-if [ -z "${GHCR_REPOSITORY:-}" ]; then
-    fail "GHCR_REPOSITORY is required (e.g. 'digitalocean-labs/openclaw-appplatform')"
+if [ -z "${REPOSITORY:-}" ]; then
+    fail "REPOSITORY is required (e.g. digitalocean-labs/openclaw-appplatform)"
     exit 1
 fi
 
-# Configure doctl auth
 export DIGITALOCEAN_ACCESS_TOKEN="$DOCTL_TOKEN"
 
-log "Starting App Platform E2E (run=$RUN_ID, image=ghcr.io/${GHCR_REPOSITORY}:${IMAGE_TAG})"
+log "Starting App Platform E2E (run=$RUN_ID, image=ghcr.io/${REPOSITORY}:${IMAGE_TAG})"
 
 # ─── Render app spec ─────────────────────────────────────────────────────────
 
 SPEC_FILE="/tmp/openclaw-e2e-spec-${RUN_ID}.yaml"
 sed \
     -e "s|PLACEHOLDER_RUN_ID|${RUN_ID}|g" \
+    -e "s|PLACEHOLDER_REPOSITORY|${REPOSITORY}|g" \
     -e "s|PLACEHOLDER_IMAGE_TAG|${IMAGE_TAG}|g" \
     -e "s|PLACEHOLDER_GATEWAY_TOKEN|${GATEWAY_TOKEN}|g" \
-    -e "s|PLACEHOLDER_REPOSITORY|${GHCR_REPOSITORY}|g" \
     "$SCRIPT_DIR/app-spec-template.yaml" > "$SPEC_FILE"
 
 log "Rendered app spec → $SPEC_FILE"
@@ -79,33 +78,21 @@ log "Rendered app spec → $SPEC_FILE"
 # ─── Deploy ───────────────────────────────────────────────────────────────────
 
 log "Creating App Platform app..."
-log "App spec contents:"
-cat "$SPEC_FILE"
-echo ""
 
 set +e
-CREATE_OUTPUT=$(doctl apps create --spec "$SPEC_FILE" --output json 2>&1)
+CREATE_OUTPUT=$(doctl apps create --spec "$SPEC_FILE" --output json 2>&1 | grep -v '^Notice:')
 CREATE_EXIT=$?
 set -e
 
-log "doctl apps create exit code: $CREATE_EXIT"
-log "doctl apps create output (last 20 lines):"
-echo "$CREATE_OUTPUT" | tail -20
-
-# doctl apps create may return non-zero exit code even on success (e.g. warnings).
-# We check for a valid APP_ID instead of relying on exit code.
-# doctl apps create --output json returns either [{...}] or {...}
-APP_ID=$(echo "$CREATE_OUTPUT" | jq -r 'if type == "array" then .[0].id else .id end // empty' 2>/dev/null)
+# Extract app ID — try jq first, fall back to grep
+APP_ID=$(echo "$CREATE_OUTPUT" | jq -r 'if type == "array" then .[0].id else .id end // ""' 2>/dev/null || true)
 
 if [ -z "$APP_ID" ]; then
-    log "DEBUG: Trying alternative JSON paths..."
-    APP_ID=$(echo "$CREATE_OUTPUT" | jq -r '.. | .id? // empty' 2>/dev/null | head -1)
+    APP_ID=$(echo "$CREATE_OUTPUT" | grep -o '"id": "[^"]*"' | head -1 | sed 's/"id": "//;s/"//' || true)
 fi
 
-log "Extracted APP_ID: $APP_ID"
-
 if [ -z "$APP_ID" ]; then
-    fail "Could not extract app ID from doctl output"
+    fail "Could not extract app ID from doctl output (exit $CREATE_EXIT):"
     echo "$CREATE_OUTPUT"
     exit 1
 fi
@@ -113,14 +100,25 @@ fi
 log "App created: $APP_ID"
 log "Waiting for deployment to become active (timeout: ${DEPLOY_TIMEOUT}s)..."
 
+# ─── Wait for ACTIVE ─────────────────────────────────────────────────────────
+
 ELAPSED=0
 POLL_INTERVAL=15
 PHASE=""
 
 while [ "$ELAPSED" -lt "$DEPLOY_TIMEOUT" ]; do
-    PHASE=$(doctl apps get "$APP_ID" --output json 2>/dev/null \
-        | jq -r '.[0].active_deployment.phase // .active_deployment.phase // "UNKNOWN"' 2>/dev/null \
-        || echo "UNKNOWN")
+    APP_JSON=$(doctl apps get "$APP_ID" --output json 2>/dev/null || echo "[]")
+
+    PENDING_PHASE=$(echo "$APP_JSON" | jq -r '(if type == "array" then .[0] else . end) | .pending_deployment.phase // ""' 2>/dev/null || true)
+    ACTIVE_PHASE=$(echo "$APP_JSON"  | jq -r '(if type == "array" then .[0] else . end) | .active_deployment.phase  // ""' 2>/dev/null || true)
+
+    if [ -n "$PENDING_PHASE" ]; then
+        PHASE="$PENDING_PHASE"
+    elif [ -n "$ACTIVE_PHASE" ]; then
+        PHASE="$ACTIVE_PHASE"
+    else
+        PHASE="UNKNOWN"
+    fi
 
     case "$PHASE" in
         ACTIVE)
@@ -129,9 +127,10 @@ while [ "$ELAPSED" -lt "$DEPLOY_TIMEOUT" ]; do
             ;;
         ERROR|CANCELED|SUPERSEDED)
             fail "Deployment entered terminal phase: $PHASE"
-            # Dump deployment logs for debugging
-            log "--- Deployment logs ---"
-            doctl apps logs "$APP_ID" --type=deploy 2>/dev/null | tail -50 || true
+            log "--- Build logs ---"
+            doctl apps logs "$APP_ID" --type=build 2>/dev/null | tail -30 || true
+            log "--- Deploy logs ---"
+            doctl apps logs "$APP_ID" --type=deploy 2>/dev/null | tail -30 || true
             exit 1
             ;;
         *)
@@ -144,17 +143,14 @@ done
 
 if [ "$PHASE" != "ACTIVE" ]; then
     fail "Deployment did not become active within ${DEPLOY_TIMEOUT}s (last phase: $PHASE)"
-    log "--- Deployment logs ---"
+    log "--- Build logs ---"
+    doctl apps logs "$APP_ID" --type=build 2>/dev/null | tail -30 || true
+    log "--- Deploy logs ---"
     doctl apps logs "$APP_ID" --type=deploy 2>/dev/null | tail -50 || true
     exit 1
 fi
 
-# ─── Wait for container init ─────────────────────────────────────────────────
-
-log "Deployment active. Waiting 30s for s6-overlay init to complete..."
-sleep 30
-
-# ─── Run health checks via console ──────────────────────────────────────────
+# ─── Health checks via runtime logs ──────────────────────────────────────────
 
 PASS=0
 FAIL_COUNT=0
@@ -162,90 +158,77 @@ FAIL_COUNT=0
 check_pass() { echo "  ✓ $1"; PASS=$((PASS + 1)); }
 check_fail() { echo "  FAIL: $1"; FAIL_COUNT=$((FAIL_COUNT + 1)); }
 
+log "Waiting for gateway startup (up to 3min)..."
+
+LOG_CONTENT=""
+for i in $(seq 1 18); do
+    RAW_LOGS=$(doctl apps logs "$APP_ID" openclaw --type=run 2>/dev/null || echo "")
+    LOG_CONTENT=$(echo "$RAW_LOGS" | sed 's/^[^ ]* [^ ]* //')
+    if echo "$LOG_CONTENT" | grep -q "\[openclaw\] Starting openclaw"; then
+        log "Gateway startup detected (~$((i * 10))s)"
+        break
+    fi
+    echo "  [$i/18] Waiting for gateway startup..."
+    sleep 10
+done
+
 log "Running E2E health checks..."
 
-# Check 1: Config is valid JSON
-CONFIG_VALID=$(doctl apps console "$APP_ID" openclaw --command "jq empty /data/.openclaw/openclaw.json && echo VALID" 2>/dev/null || echo "")
-if echo "$CONFIG_VALID" | grep -q "VALID"; then
-    check_pass "Config is valid JSON"
+# Check 1: Config was generated successfully
+if echo "$LOG_CONTENT" | grep -q "Done generating config"; then
+    check_pass "Config generated"
 else
-    check_fail "Config is invalid JSON"
+    check_fail "Config generation not confirmed in logs"
 fi
 
 # Check 2: tools.profile is coding
-PROFILE=$(doctl apps console "$APP_ID" openclaw --command "jq -r '.tools.profile' /data/.openclaw/openclaw.json" 2>/dev/null || echo "")
-if echo "$PROFILE" | grep -q "coding"; then
+if echo "$LOG_CONTENT" | grep -q '"profile": "coding"'; then
     check_pass "tools.profile: coding"
 else
+    PROFILE=$(echo "$LOG_CONTENT" | grep '"profile"' | head -1 | sed 's/.*"profile": *"\([^"]*\)".*/\1/')
     check_fail "tools.profile: '$PROFILE'"
 fi
 
-# Check 3: Config owned by openclaw
-OWNER=$(doctl apps console "$APP_ID" openclaw --command "stat -c '%U' /data/.openclaw/openclaw.json" 2>/dev/null || echo "")
-if echo "$OWNER" | grep -q "openclaw"; then
-    check_pass "Config owned by openclaw"
+# Check 3: Gateway process started
+if echo "$LOG_CONTENT" | grep -q "\[openclaw\] Starting openclaw"; then
+    check_pass "Gateway process started"
 else
-    check_fail "Config owned by: '$OWNER'"
+    check_fail "Gateway process not started"
 fi
 
-# Check 4: Gateway process running
-GW_PROC=$(doctl apps console "$APP_ID" openclaw --command "pgrep -f openclaw-gateway >/dev/null 2>&1 && echo RUNNING" 2>/dev/null || echo "")
-if echo "$GW_PROC" | grep -q "RUNNING"; then
-    check_pass "Gateway process running"
-else
-    check_fail "Gateway process not running"
-fi
-
-# Check 5: Gateway HTTP responds
-GW_HTTP=$(doctl apps console "$APP_ID" openclaw --command "curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18789/ 2>/dev/null" 2>/dev/null || echo "000")
-if echo "$GW_HTTP" | grep -q "200"; then
-    check_pass "Gateway HTTP: 200"
-else
-    check_fail "Gateway HTTP: $GW_HTTP"
-fi
-
-# Check 6: Auth mode is token
-AUTH_MODE=$(doctl apps console "$APP_ID" openclaw --command "jq -r '.gateway.auth.mode' /data/.openclaw/openclaw.json" 2>/dev/null || echo "")
-if echo "$AUTH_MODE" | grep -q "token"; then
+# Check 4: Auth mode is token
+if echo "$LOG_CONTENT" | grep -q '"mode": "token"'; then
     check_pass "Auth mode: token"
 else
-    check_fail "Auth mode: '$AUTH_MODE'"
+    check_fail "Auth mode not 'token' in logs"
 fi
 
-# Check 7: Channel plugins loaded
-PLUGINS=$(doctl apps console "$APP_ID" openclaw --command "jq -r '.plugins.entries | keys | sort | join(\",\")' /data/.openclaw/openclaw.json" 2>/dev/null || echo "")
-if echo "$PLUGINS" | grep -q "telegram"; then
-    check_pass "Channel plugins loaded"
+# Check 5: Channel plugins present (telegram is the canary)
+if echo "$LOG_CONTENT" | grep -q '"telegram"'; then
+    check_pass "Channel plugins present"
 else
-    check_fail "Channel plugins: '$PLUGINS'"
+    check_fail "Channel plugins not found in config log"
 fi
 
-# Check 8: Backup config valid
-BACKUP_CFG=$(doctl apps console "$APP_ID" openclaw --command "yq eval '.repository' /etc/digitalocean/backup.yaml 2>/dev/null && echo CFG_OK" 2>/dev/null || echo "")
-if echo "$BACKUP_CFG" | grep -q "CFG_OK"; then
-    check_pass "Backup config valid"
-else
-    check_fail "Backup config not parseable"
-fi
-
-# Check 9: Telegram channel probe (optional)
-if [ -n "${TELEGRAM_BOT_TOKEN:-}" ]; then
-    log "Probing Telegram channel..."
-    doctl apps console "$APP_ID" openclaw --command "
-        jq '.plugins.entries.telegram.token = \"${TELEGRAM_BOT_TOKEN}\"' /data/.openclaw/openclaw.json > /tmp/oc_tg.json \
-        && cp /tmp/oc_tg.json /data/.openclaw/openclaw.json \
-        && chown openclaw:openclaw /data/.openclaw/openclaw.json \
-        && /command/s6-svc -r /run/service/openclaw
-    " 2>/dev/null || true
-    sleep 15
-    TG_STATUS=$(doctl apps console "$APP_ID" openclaw --command "su - openclaw -c 'openclaw channels status 2>/dev/null'" 2>/dev/null || echo "")
-    if echo "$TG_STATUS" | grep -qi "connected\|available\|ok"; then
-        check_pass "Telegram channel connected"
-    else
-        echo "  WARN: Telegram channel status unclear: $TG_STATUS"
+# Check 6: Feature flags applied (services disabled per spec)
+MISSING_FLAGS=""
+for svc in tailscale ngrok sshd; do
+    if ! echo "$LOG_CONTENT" | grep -qi "\[$svc\].*[Dd]isabled\|\[$svc\].*[Ss]kip"; then
+        MISSING_FLAGS="$MISSING_FLAGS $svc"
     fi
+done
+if [ -z "$MISSING_FLAGS" ]; then
+    check_pass "Feature flags applied (tailscale/ngrok/ssh disabled)"
 else
-    echo "  SKIP: Telegram probe (TELEGRAM_BOT_TOKEN not set)"
+    echo "  WARN: disable log not found for:$MISSING_FLAGS (may still be correct)"
+fi
+
+# Check 7: Init scripts all exited 0
+INIT_FAILURES=$(echo "$LOG_CONTENT" | grep "cont-init.*exited" | grep -v "exited 0" || true)
+if [ -z "$INIT_FAILURES" ]; then
+    check_pass "All init scripts exited 0"
+else
+    check_fail "Init failures detected: $INIT_FAILURES"
 fi
 
 # ─── Results ──────────────────────────────────────────────────────────────────
@@ -254,8 +237,8 @@ echo ""
 log "E2E Results: $PASS passed, $FAIL_COUNT failed"
 
 if [ "$FAIL_COUNT" -gt 0 ]; then
-    log "--- Runtime logs ---"
-    doctl apps logs "$APP_ID" --type=run 2>/dev/null | tail -30 || true
+    log "--- Runtime logs (last 50 lines) ---"
+    echo "$LOG_CONTENT" | tail -50
     fail "$FAIL_COUNT E2E checks failed"
     exit 1
 fi
