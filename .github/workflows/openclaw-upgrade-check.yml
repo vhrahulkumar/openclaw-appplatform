@@ -269,6 +269,7 @@ jobs:
           DOCTL_TOKEN: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
           # Use provided image_tag (bypass mode) or the tag pushed by push-e2e-image
           IMAGE_TAG: ${{ inputs.image_tag || needs.push-e2e-image.outputs.image_tag }}
+          REPOSITORY: ${{ github.repository }}
           RUN_ID: ${{ github.run_id }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           DEPLOY_TIMEOUT: "600"
