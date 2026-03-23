@@ -17,7 +17,7 @@
 4. **NEVER add config corruption recovery.** Fix the cause, not the symptom.
 5. **Every jq write to openclaw.json MUST be followed by:** `chown openclaw:openclaw "$CONFIG_FILE"`
 6. **Use `jq '.key //= "value"`** (set-if-missing) for new defaults, not unconditional set.
-7. **Test with the existing CI test suite.** Do not skip or modify tests to make them pass.
+7. **NEVER modify test files (`tests/`) to make them pass.** Fix the application code instead. See "Test Integrity" section below.
 8. **Read UPGRADE-AUTOMATION-CONTEXT.md** before making any upgrade-related changes.
 
 ### What Actually Went Wrong (2026.2.9 → 2026.3.11)
@@ -302,6 +302,46 @@ jq '.tools.profile //= "coding"' "$CONFIG_FILE" > "${CONFIG_FILE}.tmp"
 mv "${CONFIG_FILE}.tmp" "$CONFIG_FILE"
 chown openclaw:openclaw "$CONFIG_FILE"  # REQUIRED
 ```
+
+---
+
+## Test Integrity — NEVER Modify Tests to Make Them Pass
+
+**Tests exist to verify the application behaves correctly. If a test fails, fix the application — not the test.**
+
+### ❌ NEVER do this
+
+```bash
+# WRONG — changes the test to avoid a FAIL by making the assertion weaker
+- PNPM_EXCLUDED=$(docker exec "$CONTAINER" grep -c 'pnpm' /etc/digitalocean/backup.yaml || echo "0")
+- if [ "$PNPM_EXCLUDED" -ge 1 ]; then
++ if docker exec "$CONTAINER" grep -q 'pnpm' /etc/digitalocean/backup.yaml; then
+```
+
+Even if the test had a bash bug, the correct fix is to fix the bash bug **only** — not to change what the test checks or weaken its assertion.
+
+### ✅ Always do this instead
+
+When a test FAILs, trace it to the root cause in the application:
+
+| Test failure | Root cause | Fix location |
+|---|---|---|
+| `tools.profile is 'null'` | Default changed upstream in 2026.3.x | Add `jq '.tools.profile //= "coding"'` in `20-setup-openclaw` AND add `"tools": {"profile": "coding"}` to `openclaw.default.json` |
+| `pnpm store may not be excluded` | Missing backup exclusion | Add `.local/share/pnpm/store` to `backup.yaml` exclude list |
+| `Config owned by root` | Missing chown after jq write | Add `chown openclaw:openclaw "$CONFIG_FILE"` after every jq mutation |
+| `Auth mode: not token` | Config overwrite lost token | Fix config preservation logic in `20-setup-openclaw` |
+
+### How to trace a test failure to the fix
+
+1. Read the exact FAIL message from the test output in the issue
+2. Find the failing assertion in `tests/minimal/04-upgrade-verify.sh` — understand what it checks
+3. Identify **which application file** controls that behavior (see table above)
+4. Apply the fix to **that application file**, not to the test
+5. Rebuild and re-run the test to confirm it passes
+
+### PR review rule
+
+**Always verify the "Files changed" tab matches the PR description.** Copilot's PR descriptions can describe changes that were never actually committed. If the description says `20-setup-openclaw` was changed but it doesn't appear in "Files changed", the fix is incomplete.
 
 ---
 
