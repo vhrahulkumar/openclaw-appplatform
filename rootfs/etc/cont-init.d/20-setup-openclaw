@@ -108,6 +108,11 @@ fi
 echo "[generate-config] Adding gateway.auth.token to config"
 jq --arg token "$OPENCLAW_GATEWAY_TOKEN" '.gateway.auth.token = $token | .gateway.auth.mode = "token"' "$CONFIG_FILE" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "$CONFIG_FILE"
 
+# Ensure tools.profile defaults to 'coding' (changed in 2026.3.x)
+echo "[generate-config] Setting tools.profile default to 'coding'"
+jq '.tools.profile //= "coding"' "$CONFIG_FILE" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "$CONFIG_FILE"
+chown openclaw:openclaw "$CONFIG_FILE"
+
 # Permissions applied via /etc/digitalocean/permissions.yaml
 
 echo "[generate-config] Final config:"
