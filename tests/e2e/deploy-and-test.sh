@@ -2,7 +2,7 @@
 # deploy-and-test.sh — Deploy openclaw to App Platform and run E2E verification.
 #
 # Deploys a pre-built Docker image (from GHCR) as an App Platform worker,
-# waits for it to become active, runs health checks via doctl console,
+# waits for it to become active, runs log-based health checks,
 # and cleans up the test app afterward.
 #
 # Required env vars:
@@ -59,7 +59,6 @@ if [ -z "${REPOSITORY:-}" ]; then
     exit 1
 fi
 
-# Configure doctl auth
 export DIGITALOCEAN_ACCESS_TOKEN="$DOCTL_TOKEN"
 
 log "Starting App Platform E2E (run=$RUN_ID, image=ghcr.io/${REPOSITORY}:${IMAGE_TAG})"
@@ -79,41 +78,29 @@ log "Rendered app spec → $SPEC_FILE"
 # ─── Deploy ───────────────────────────────────────────────────────────────────
 
 log "Creating App Platform app..."
-log "App spec contents:"
-cat "$SPEC_FILE"
-echo ""
 
 set +e
 CREATE_OUTPUT=$(doctl apps create --spec "$SPEC_FILE" --output json 2>&1 | grep -v '^Notice:')
 CREATE_EXIT=$?
 set -e
 
-log "doctl apps create exit code: $CREATE_EXIT"
-# Show first line to expose any non-JSON prefix (e.g. doctl warning on stderr via 2>&1)
-log "doctl apps create output (first line): $(echo "$CREATE_OUTPUT" | head -1 | cut -c1-300)"
-log "doctl apps create output (last 20 lines):"
-echo "$CREATE_OUTPUT" | tail -20
-
-# Extract app ID. doctl 2>&1 capture means stderr warnings can prefix the JSON,
-# breaking jq. Try jq first, then fall back to grep (the proven pattern).
+# Extract app ID — try jq first, fall back to grep
 APP_ID=$(echo "$CREATE_OUTPUT" | jq -r 'if type == "array" then .[0].id else .id end // ""' 2>/dev/null || true)
 
 if [ -z "$APP_ID" ]; then
-    log "DEBUG: jq failed or returned empty — trying grep fallback..."
     APP_ID=$(echo "$CREATE_OUTPUT" | grep -o '"id": "[^"]*"' | head -1 | sed 's/"id": "//;s/"//' || true)
 fi
 
 if [ -z "$APP_ID" ]; then
-    log "DEBUG: grep also failed — dumping full output for inspection:"
+    fail "Could not extract app ID from doctl output (exit $CREATE_EXIT):"
     echo "$CREATE_OUTPUT"
-    fail "Could not extract app ID from doctl output"
     exit 1
 fi
 
-log "Extracted APP_ID: $APP_ID"
-
 log "App created: $APP_ID"
 log "Waiting for deployment to become active (timeout: ${DEPLOY_TIMEOUT}s)..."
+
+# ─── Wait for ACTIVE ─────────────────────────────────────────────────────────
 
 ELAPSED=0
 POLL_INTERVAL=15
@@ -122,23 +109,15 @@ PHASE=""
 while [ "$ELAPSED" -lt "$DEPLOY_TIMEOUT" ]; do
     APP_JSON=$(doctl apps get "$APP_ID" --output json 2>/dev/null || echo "[]")
 
-    # doctl apps get returns [{app}] (array) — normalise to object before extracting phase.
-    # Add || true so a jq type error never kills the loop under set -euo pipefail.
     PENDING_PHASE=$(echo "$APP_JSON" | jq -r '(if type == "array" then .[0] else . end) | .pending_deployment.phase // ""' 2>/dev/null || true)
     ACTIVE_PHASE=$(echo "$APP_JSON"  | jq -r '(if type == "array" then .[0] else . end) | .active_deployment.phase  // ""' 2>/dev/null || true)
 
-    # Prefer pending (in-progress) over active (stable state)
     if [ -n "$PENDING_PHASE" ]; then
         PHASE="$PENDING_PHASE"
     elif [ -n "$ACTIVE_PHASE" ]; then
         PHASE="$ACTIVE_PHASE"
     else
         PHASE="UNKNOWN"
-        # Debug on first occurrence
-        if [ "$ELAPSED" -eq 0 ]; then
-            log "DEBUG: No deployment phase found. Raw JSON keys:"
-            echo "$APP_JSON" | jq -r '(if type == "array" then .[0] else . end) | keys | .[]' 2>/dev/null | head -10 || echo "jq failed"
-        fi
     fi
 
     case "$PHASE" in
@@ -171,8 +150,7 @@ if [ "$PHASE" != "ACTIVE" ]; then
     exit 1
 fi
 
-# ─── Wait for gateway startup and collect runtime logs ───────────────────────
-# doctl apps console has no --command flag; use runtime log polling instead.
+# ─── Health checks via runtime logs ──────────────────────────────────────────
 
 PASS=0
 FAIL_COUNT=0
@@ -185,7 +163,6 @@ log "Waiting for gateway startup (up to 3min)..."
 LOG_CONTENT=""
 for i in $(seq 1 18); do
     RAW_LOGS=$(doctl apps logs "$APP_ID" openclaw --type=run 2>/dev/null || echo "")
-    # Strip the "<component> <timestamp>" prefix from each log line
     LOG_CONTENT=$(echo "$RAW_LOGS" | sed 's/^[^ ]* [^ ]* //')
     if echo "$LOG_CONTENT" | grep -q "\[openclaw\] Starting openclaw"; then
         log "Gateway startup detected (~$((i * 10))s)"
