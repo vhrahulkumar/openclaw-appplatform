@@ -406,17 +406,17 @@ jobs:
           cat >> "$PR_BODY_FILE" <<'RELEASEEOF'
           ${{ needs.check-version.outputs.release_notes }}
           RELEASEEOF
-          cat >> "$PR_BODY_FILE" <<'FOOTEREOF'
-
----
-**This is an automated version bump. Only the Dockerfile was changed.**
-If release notes mention config/schema changes, manual review is required.
-Do not merge if there are known regressions above.
-
-<details><summary>Docker test output</summary>
-
-```
-FOOTEREOF
+          {
+            echo ''
+            echo '---'
+            echo '**This is an automated version bump. Only the Dockerfile was changed.**'
+            echo 'If release notes mention config/schema changes, manual review is required.'
+            echo 'Do not merge if there are known regressions above.'
+            echo ''
+            echo '<details><summary>Docker test output</summary>'
+            echo ''
+            echo '```'
+          } >> "$PR_BODY_FILE"
           cat >> "$PR_BODY_FILE" <<'TESTLOGEOF'
           ${{ needs.docker-tests.outputs.test_log }}
           TESTLOGEOF
