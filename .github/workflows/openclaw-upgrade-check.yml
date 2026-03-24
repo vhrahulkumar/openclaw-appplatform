@@ -85,12 +85,14 @@ jobs:
             fi
           fi
 
-          # Get release notes
+          # Get release notes — use a random delimiter to prevent premature EOF termination
+          # if upstream release notes contain a bare "EOF" line (e.g. in code examples).
           NOTES=$(curl -s https://api.github.com/repos/openclaw/openclaw/releases | \
             jq -r '.[] | select(.prerelease == false) | "## \(.name)\n\(.body)\n"' | head -500)
-          echo "release_notes<<EOF" >> $GITHUB_OUTPUT
+          NOTES_DELIM="NOTES_EOF_$(openssl rand -hex 8)"
+          echo "release_notes<<${NOTES_DELIM}" >> $GITHUB_OUTPUT
           echo "$NOTES" | head -200 >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
+          echo "${NOTES_DELIM}" >> $GITHUB_OUTPUT
 
       - name: Check for known regressions
         if: steps.check.outputs.needs_upgrade == 'true'
@@ -101,9 +103,10 @@ jobs:
             jq -r '.items[] | "- #\(.number): \(.title)"')
           if [ -n "$ISSUES" ]; then
             echo "has_regressions=true" >> $GITHUB_OUTPUT
-            echo "regression_list<<EOF" >> $GITHUB_OUTPUT
+            REG_DELIM="REG_EOF_$(openssl rand -hex 8)"
+            echo "regression_list<<${REG_DELIM}" >> $GITHUB_OUTPUT
             echo "$ISSUES" >> $GITHUB_OUTPUT
-            echo "EOF" >> $GITHUB_OUTPUT
+            echo "${REG_DELIM}" >> $GITHUB_OUTPUT
           else
             echo "has_regressions=false" >> $GITHUB_OUTPUT
           fi
@@ -170,10 +173,10 @@ jobs:
 
           echo "$OUTPUT"
 
-          # Store results for downstream jobs
-          echo "log<<EOF" >> $GITHUB_OUTPUT
+          LOG_DELIM="LOG_EOF_$(openssl rand -hex 8)"
+          echo "log<<${LOG_DELIM}" >> $GITHUB_OUTPUT
           echo "$OUTPUT" | tail -40 >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
+          echo "${LOG_DELIM}" >> $GITHUB_OUTPUT
 
           if [ $EXIT_CODE -eq 0 ]; then
             echo "result=pass" >> $GITHUB_OUTPUT
@@ -289,9 +292,10 @@ jobs:
 
           echo "$OUTPUT"
 
-          echo "log<<EOF" >> $GITHUB_OUTPUT
+          LOG_DELIM="LOG_EOF_$(openssl rand -hex 8)"
+          echo "log<<${LOG_DELIM}" >> $GITHUB_OUTPUT
           echo "$OUTPUT" | tail -40 >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
+          echo "${LOG_DELIM}" >> $GITHUB_OUTPUT
 
           if [ $EXIT_CODE -eq 0 ]; then
             echo "result=pass" >> $GITHUB_OUTPUT
@@ -328,6 +332,7 @@ jobs:
 
       - name: Create upgrade PR
         run: |
+          set -eo pipefail
           VERSION=${{ needs.check-version.outputs.latest }}
           CURRENT=${{ needs.check-version.outputs.current }}
           BRANCH="upgrade-openclaw-${VERSION}"
@@ -368,7 +373,7 @@ jobs:
           fi
 
           # Check if PR already exists
-          EXISTING_PR=$(gh pr list --head "$BRANCH" --json number --jq '.[0].number' 2>/dev/null || echo "")
+          EXISTING_PR=$(gh pr list --head "$BRANCH" --json number --jq '.[0].number // empty' 2>/dev/null || echo "")
           if [ -n "$EXISTING_PR" ]; then
             echo "PR #$EXISTING_PR already exists — updating"
             exit 0
@@ -401,20 +406,21 @@ jobs:
           cat >> "$PR_BODY_FILE" <<'RELEASEEOF'
           ${{ needs.check-version.outputs.release_notes }}
           RELEASEEOF
-          cat >> "$PR_BODY_FILE" <<ENDBODY
+          cat >> "$PR_BODY_FILE" <<'FOOTEREOF'
 
-          ---
-          **This is an automated version bump. Only the Dockerfile was changed.**
-          If release notes mention config/schema changes, manual review is required.
-          Do not merge if there are known regressions above.
+---
+**This is an automated version bump. Only the Dockerfile was changed.**
+If release notes mention config/schema changes, manual review is required.
+Do not merge if there are known regressions above.
 
-          <details><summary>Docker test output</summary>
+<details><summary>Docker test output</summary>
 
-          \`\`\`
+```
+FOOTEREOF
+          cat >> "$PR_BODY_FILE" <<'TESTLOGEOF'
           ${{ needs.docker-tests.outputs.test_log }}
-          \`\`\`
-          </details>
-          ENDBODY
+          TESTLOGEOF
+          printf '```\n</details>\n' >> "$PR_BODY_FILE"
 
           gh pr create \
             --title "Upgrade OpenClaw to ${VERSION}" \
@@ -441,36 +447,35 @@ jobs:
       - name: Determine failure source
         id: failure
         run: |
+          LOG_DELIM="LOG_EOF_$(openssl rand -hex 8)"
           if [ "${{ needs.docker-tests.result }}" = "failure" ]; then
             echo "stage=Docker smoke tests" >> $GITHUB_OUTPUT
-            echo "log<<EOF" >> $GITHUB_OUTPUT
+            echo "log<<${LOG_DELIM}" >> $GITHUB_OUTPUT
             cat <<'LOGEOF' >> $GITHUB_OUTPUT
           ${{ needs.docker-tests.outputs.test_log }}
           LOGEOF
-            echo "EOF" >> $GITHUB_OUTPUT
+            echo "${LOG_DELIM}" >> $GITHUB_OUTPUT
           else
             echo "stage=App Platform E2E" >> $GITHUB_OUTPUT
-            echo "log<<EOF" >> $GITHUB_OUTPUT
+            echo "log<<${LOG_DELIM}" >> $GITHUB_OUTPUT
             cat <<'LOGEOF' >> $GITHUB_OUTPUT
           ${{ needs.app-platform-e2e.outputs.e2e_log }}
           LOGEOF
-            echo "EOF" >> $GITHUB_OUTPUT
+            echo "${LOG_DELIM}" >> $GITHUB_OUTPUT
           fi
 
       - name: Create issue for failed upgrade
         run: |
+          set -eo pipefail
           VERSION=${{ needs.check-version.outputs.latest }}
           CURRENT=${{ needs.check-version.outputs.current }}
           STAGE="${{ steps.failure.outputs.stage }}"
           RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
-          # Write dynamic content to temp files to prevent shell variable expansion
-          # from leaking secrets into inline --body strings
           ISSUE_BODY_FILE=$(mktemp)
-          COMMENT_BODY_FILE=$(mktemp)
-
-          # Build regression note safely — use temp file to avoid shell expansion
           REGRESSION_FILE=$(mktemp)
+          INSTRUCTIONS_FILE=$(mktemp)
+
           if [ "${{ needs.check-version.outputs.has_regressions }}" = "true" ]; then
             echo '### Known Regressions' > "$REGRESSION_FILE"
             cat >> "$REGRESSION_FILE" <<'REGEOF'
@@ -478,10 +483,21 @@ jobs:
           REGEOF
           fi
 
+          cat > "$INSTRUCTIONS_FILE" <<'INSTR'
+          Read UPGRADE-AUTOMATION-CONTEXT.md for full context. Examine the test output and release notes in the issue body.
+          - Most upgrades require ONLY a Dockerfile version bump — do not over-engineer
+          - NEVER modify test files in tests/ — fix the application code instead
+          - Use jq '.key //= "value"' (set-if-missing) for any new config defaults
+          - Every jq write to openclaw.default.json MUST be followed by chown openclaw:openclaw
+          - If a known upstream regression exists, recommend skipping the version rather than patching tests
+          - See .github/copilot-instructions.md for the full rule set
+          INSTR
+
           # Check if issue already exists for this version
-          EXISTING=$(gh issue list --search "OpenClaw ${VERSION} upgrade failed" --json number --jq '.[0].number' 2>/dev/null || echo "")
+          EXISTING=$(gh issue list --search "OpenClaw ${VERSION} upgrade failed" --json number --jq '.[0].number // empty' 2>/dev/null || echo "")
           if [ -n "$EXISTING" ]; then
-            echo "Issue #$EXISTING already exists for version $VERSION — adding comment"
+            echo "Issue #$EXISTING already exists for version $VERSION — adding comment and re-assigning Copilot"
+            COMMENT_BODY_FILE=$(mktemp)
             cat > "$COMMENT_BODY_FILE" <<ENDBODY
           Workflow re-run failed again.
           [Workflow run](${RUN_URL})
@@ -495,19 +511,23 @@ jobs:
           LOGEOF
             echo '```' >> "$COMMENT_BODY_FILE"
             gh issue comment "$EXISTING" --body-file "$COMMENT_BODY_FILE"
-            # Trigger Copilot with user token if available
+            rm -f "$COMMENT_BODY_FILE"
             if [ -n "$COPILOT_TRIGGER_TOKEN" ]; then
-              echo "@copilot Workflow re-run still failing — please continue investigating." > "$COMMENT_BODY_FILE"
-              GH_TOKEN="$COPILOT_TRIGGER_TOKEN" gh issue comment "$EXISTING" --body-file "$COMMENT_BODY_FILE"
+              jq -n \
+                --rawfile instructions "$INSTRUCTIONS_FILE" \
+                --arg repo "${{ github.repository }}" \
+                '{"assignees": ["copilot-swe-agent[bot]"], "agent_assignment": {"target_repo": $repo, "base_branch": "main", "custom_instructions": $instructions}}' | \
+              GH_TOKEN="$COPILOT_TRIGGER_TOKEN" gh api \
+                --method POST \
+                -H "Accept: application/vnd.github+json" \
+                -H "X-GitHub-Api-Version: 2022-11-28" \
+                --input - \
+                "/repos/${{ github.repository }}/issues/${EXISTING}/assignees" 2>/dev/null || true
             fi
-            rm -f "$ISSUE_BODY_FILE" "$COMMENT_BODY_FILE"
+            rm -f "$ISSUE_BODY_FILE" "$REGRESSION_FILE" "$INSTRUCTIONS_FILE"
             exit 0
           fi
 
-          # Write issue body to file.
-          # CRITICAL: Use a quoted heredoc (<<'ENDBODY') for the release notes section
-          # to prevent bash from expanding $(), ${}, backticks etc. in upstream release notes.
-          # Dynamic variables are written first, then the release notes appended safely.
           cat > "$ISSUE_BODY_FILE" <<ENDBODY
           ## Automated Upgrade Failed: ${CURRENT} → ${VERSION}
 
@@ -516,63 +536,43 @@ jobs:
 
           ### Test Output
           ENDBODY
-          # Append test log safely
           echo '```' >> "$ISSUE_BODY_FILE"
           cat >> "$ISSUE_BODY_FILE" <<'LOGEOF'
           ${{ steps.failure.outputs.log }}
           LOGEOF
           echo '```' >> "$ISSUE_BODY_FILE"
           echo '' >> "$ISSUE_BODY_FILE"
-          # Append regression notes if any
           if [ -s "$REGRESSION_FILE" ]; then
             cat "$REGRESSION_FILE" >> "$ISSUE_BODY_FILE"
             echo '' >> "$ISSUE_BODY_FILE"
           fi
           echo '### Release Notes' >> "$ISSUE_BODY_FILE"
-          # Append release notes safely — no shell expansion
           cat >> "$ISSUE_BODY_FILE" <<'RELEASEEOF'
           ${{ needs.check-version.outputs.release_notes }}
           RELEASEEOF
 
-          ISSUE_URL=$(gh issue create \
-            --title "⚠️ OpenClaw ${VERSION} upgrade failed automated tests" \
-            --body-file "$ISSUE_BODY_FILE")
-
-          ISSUE_NUMBER=$(echo "$ISSUE_URL" | grep -oE '[0-9]+$')
-
-          # Trigger the Copilot coding agent.
-          # GITHUB_TOKEN (bot) cannot trigger Copilot — only a real user token can.
-          # Store a fine-grained PAT with issues:write as secret COPILOT_TRIGGER_TOKEN.
           if [ -n "$COPILOT_TRIGGER_TOKEN" ]; then
-            GH_TOKEN="$COPILOT_TRIGGER_TOKEN" gh issue edit "$ISSUE_NUMBER" \
-              --add-assignee "Copilot" 2>/dev/null || true
-            cat > "$COMMENT_BODY_FILE" <<'ENDCOMMENT'
-          @copilot Please investigate this failed upgrade using the `/openclaw-upgrader` prompt.
-
-          **Steps:**
-          1. Read `UPGRADE-AUTOMATION-CONTEXT.md` for full context on how upgrades work
-          2. Read the release notes in the issue body and the [full changelog](https://github.com/openclaw/openclaw/releases)
-          3. Identify the root cause of the test failure
-          4. Apply the **minimum necessary fix** following the rules in `.github/copilot-instructions.md`
-          5. Push a branch and open a PR — CI will run the full test suite
-          6. If CI passes, the PR is ready for human review
-          7. If CI fails after 2 attempts, comment with your analysis explaining what blocked it
-
-          **Critical rules:**
-          - Most upgrades need ONLY a Dockerfile version bump
-          - NEVER modify `rootfs/etc/services.d/openclaw/run`
-          - NEVER modify test files in `tests/` — fix the application code instead
-          - Use `jq '.key //= "value"'` (set-if-missing) for new defaults
-          - Every jq write MUST be followed by `chown openclaw:openclaw`
-          - If there's a known upstream regression, recommend skipping the version
-          ENDCOMMENT
-            GH_TOKEN="$COPILOT_TRIGGER_TOKEN" gh issue comment "$ISSUE_NUMBER" \
-              --body-file "$COMMENT_BODY_FILE"
+            # Create issue and assign Copilot in one call via the official Dec 2025 API.
+            # GITHUB_TOKEN (bot) cannot trigger Copilot — only a user PAT can.
+            jq -n \
+              --arg title "⚠️ OpenClaw ${VERSION} upgrade failed automated tests" \
+              --rawfile body "$ISSUE_BODY_FILE" \
+              --rawfile instructions "$INSTRUCTIONS_FILE" \
+              --arg repo "${{ github.repository }}" \
+              '{title: $title, body: $body, assignees: ["copilot-swe-agent[bot]"], agent_assignment: {target_repo: $repo, base_branch: "main", custom_instructions: $instructions}}' | \
+            GH_TOKEN="$COPILOT_TRIGGER_TOKEN" gh api \
+              --method POST \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              --input - \
+              "/repos/${{ github.repository }}/issues"
           else
-            echo "⚠️ COPILOT_TRIGGER_TOKEN not set — Copilot must be triggered manually on issue #${ISSUE_NUMBER}"
-            echo "   Assign Copilot as assignee or post a @copilot comment on the issue."
+            echo "⚠️ COPILOT_TRIGGER_TOKEN not set — Copilot must be triggered manually."
+            gh issue create \
+              --title "⚠️ OpenClaw ${VERSION} upgrade failed automated tests" \
+              --body-file "$ISSUE_BODY_FILE"
           fi
-          rm -f "$ISSUE_BODY_FILE" "$COMMENT_BODY_FILE" "$REGRESSION_FILE"
+          rm -f "$ISSUE_BODY_FILE" "$REGRESSION_FILE" "$INSTRUCTIONS_FILE"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           COPILOT_TRIGGER_TOKEN: ${{ secrets.COPILOT_TRIGGER_TOKEN }}
