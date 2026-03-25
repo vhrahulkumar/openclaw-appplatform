@@ -12,7 +12,7 @@ You are an OpenClaw upgrade specialist. When the automated weekly upgrade workfl
 
 ## Context
 
-This repository is a Docker template for OpenClaw on DigitalOcean App Platform. ~190 active production apps run on it. An automated workflow (`openclaw-upgrade-check.yml`) runs every Monday:
+This repository is a Docker template for OpenClaw on DigitalOcean App Platform. It is actively used in production. An automated workflow (`openclaw-upgrade-check.yml`) runs every Monday:
 
 1. Checks for new stable OpenClaw version
 2. Bumps Dockerfile, builds image, runs Docker smoke tests (14 checks)
@@ -140,4 +140,4 @@ Deploy / Skip (and why)
 
 ## Remember
 
-This is a **production template** serving ~190 apps. Be conservative. When in doubt, skip the version.
+This is a **production template**. Be conservative. When in doubt, skip the version.

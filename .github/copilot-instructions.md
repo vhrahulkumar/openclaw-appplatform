@@ -3,7 +3,7 @@
 ## Repository Overview
 `openclaw-appplatform` is a Docker template for deploying OpenClaw on DigitalOcean App Platform. It wraps OpenClaw (installed via `pnpm add -g openclaw`) with s6-overlay service management, Tailscale networking, and Restic backup support.
 
-**~190 active customer apps** run on this template. When we push to `main`, apps with `deploy_on_push: true` automatically rebuild and redeploy.
+Apps using this template with `deploy_on_push: true` automatically rebuild and redeploy when changes are pushed to `main`.
 
 ---
 
@@ -404,7 +404,7 @@ docker exec <container-name> curl -v http://127.0.0.1:18789/
 
 ## Release Monitoring
 
-This template has **~190 active production apps**. Changes require careful rollout:
+This template is actively used in production. Changes require careful rollout:
 
 1. **Test locally** with the upgrade verification script
 2. **Open PR** (automated by workflow if tests pass)
